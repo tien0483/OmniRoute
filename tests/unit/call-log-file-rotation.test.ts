@@ -33,12 +33,7 @@ async function resetTestDataDir() {
         if (/^storage\.sqlite(?:-shm|-wal)?$/i.test(entry)) {
           continue;
         }
-        fs.rmSync(path.join(TEST_DATA_DIR, entry), {
-          recursive: true,
-          force: true,
-          maxRetries: 5,
-          retryDelay: 100,
-        });
+        fs.rmSync(path.join(TEST_DATA_DIR, entry), { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
       }
       const db = core.getDbInstance();
       db.prepare("DELETE FROM call_logs").run();

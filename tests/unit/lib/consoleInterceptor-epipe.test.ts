@@ -259,6 +259,5 @@ test.after(() => {
   if (prevLogFilePath === undefined) delete process.env.APP_LOG_FILE_PATH;
   else process.env.APP_LOG_FILE_PATH = prevLogFilePath;
 
-  if (existsSync(dir))
-    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  if (existsSync(dir)) rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });

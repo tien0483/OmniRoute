@@ -58,12 +58,7 @@ describe("pluginManager lifecycle", () => {
         assert.ok(dbRow);
         assert.equal(dbRow!.status, "installed");
       } finally {
-        rmSync(dir.split("/").slice(0, -1).join("/"), {
-          recursive: true,
-          force: true,
-          maxRetries: 5,
-          retryDelay: 100,
-        });
+        rmSync(dir.split("/").slice(0, -1).join("/"), { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
       }
     });
 
@@ -86,12 +81,7 @@ describe("pluginManager lifecycle", () => {
         // the plugin's child process — without it the child outlives the test and its
         // IPC channel keeps this process's event loop alive after the suite finishes.
         await mod.pluginManager.deactivate("activate-test").catch(() => {});
-        rmSync(dir.split("/").slice(0, -1).join("/"), {
-          recursive: true,
-          force: true,
-          maxRetries: 5,
-          retryDelay: 100,
-        });
+        rmSync(dir.split("/").slice(0, -1).join("/"), { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
       }
     });
 
@@ -105,12 +95,7 @@ describe("pluginManager lifecycle", () => {
         const dbRow = db.getPluginByName("deactivate-test");
         assert.equal(dbRow!.status, "inactive");
       } finally {
-        rmSync(dir.split("/").slice(0, -1).join("/"), {
-          recursive: true,
-          force: true,
-          maxRetries: 5,
-          retryDelay: 100,
-        });
+        rmSync(dir.split("/").slice(0, -1).join("/"), { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
       }
     });
 
@@ -129,12 +114,7 @@ describe("pluginManager lifecycle", () => {
         const dbRow = db.getPluginByName("uninstall-test");
         assert.equal(dbRow, null);
       } finally {
-        rmSync(dir.split("/").slice(0, -1).join("/"), {
-          recursive: true,
-          force: true,
-          maxRetries: 5,
-          retryDelay: 100,
-        });
+        rmSync(dir.split("/").slice(0, -1).join("/"), { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
       }
     });
   });
