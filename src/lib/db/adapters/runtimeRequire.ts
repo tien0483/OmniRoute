@@ -10,8 +10,23 @@
  */
 import * as nodeModule from "node:module";
 
+const esmRequire = nodeModule.createRequire(import.meta.url);
+
 function esmRuntimeRequire(specifier: string): unknown {
-  return nodeModule.createRequire(import.meta.url)(specifier);
+  switch (specifier) {
+    case "better-sqlite3":
+      return esmRequire("better-sqlite3");
+    case "node:sqlite":
+      return esmRequire("node:sqlite");
+    case "bun:sqlite":
+      return esmRequire("bun:sqlite");
+    case "sql.js":
+      return esmRequire("sql.js");
+    case "sqlite-vec":
+      return esmRequire("sqlite-vec");
+    default:
+      throw new Error(`Unsupported runtime require: ${specifier}`);
+  }
 }
 
 export function runtimeRequire(specifier: string): unknown {

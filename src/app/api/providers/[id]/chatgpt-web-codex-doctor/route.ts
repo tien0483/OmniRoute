@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 
+export const dynamic = "force-dynamic";
+
 import { requireManagementAuth } from "@/lib/api/requireManagementAuth";
 import { getProviderConnectionById } from "@/lib/db/providers";
 import { getChatGptWebCodexDoctorStatus } from "@omniroute/open-sse/services/chatgptWebCodexAdmin.ts";

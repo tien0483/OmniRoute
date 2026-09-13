@@ -1,4 +1,6 @@
 import { NextResponse } from "next/server";
+
+export const dynamic = "force-dynamic";
 import { getCachedCursorAgentAvailability } from "@/lib/cursor/renewal";
 import { sanitizeErrorMessage } from "@omniroute/open-sse/utils/error";
 

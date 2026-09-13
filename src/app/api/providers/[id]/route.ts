@@ -1,4 +1,6 @@
 import { NextResponse } from "next/server";
+
+export const dynamic = "force-dynamic";
 import { getAuditRequestContext, logAuditEvent } from "@/lib/compliance/index";
 import {
   getProviderAuditTarget,
@@ -215,7 +217,8 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
     // the override (connection follows the global default); 0-1440 = explicit
     // per-connection minutes (0 opts this connection out of the sweep).
     if (healthCheckInterval === null) updateData.healthCheckInterval = null;
-    else if (healthCheckInterval !== undefined) updateData.healthCheckInterval = healthCheckInterval;
+    else if (healthCheckInterval !== undefined)
+      updateData.healthCheckInterval = healthCheckInterval;
     if (group !== undefined) updateData.group = group;
     if (maxConcurrent !== undefined) updateData.maxConcurrent = maxConcurrent;
     if (incomingWindowThresholds !== undefined) {

@@ -1,4 +1,6 @@
 import { NextResponse } from "next/server";
+
+export const dynamic = "force-dynamic";
 import { getAllExpirations, getExpirationSummary } from "@/domain/providerExpiration";
 
 export async function GET() {

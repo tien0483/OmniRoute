@@ -1,4 +1,6 @@
 import { NextResponse } from "next/server";
+
+export const dynamic = "force-dynamic";
 import { createProviderNode, getProviderNodes } from "@/models";
 import { getProviderNodesCount } from "@/lib/db/providers/nodes";
 import {
