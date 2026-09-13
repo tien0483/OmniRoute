@@ -768,7 +768,9 @@ export async function GET(
       let lastErrorStatus = null;
       const token = apiKey || accessToken;
 
-      for (const modelsUrl of uniqueEndpoints) {
+      let fatalGuardError: any = null;
+
+      const probeSingle = async (modelsUrl: string, signal?: AbortSignal) => {
         try {
           const response = await safeOutboundFetch(modelsUrl, {
             ...SAFE_OUTBOUND_FETCH_PRESETS.modelsProbe,
@@ -782,33 +784,80 @@ export async function GET(
             headers: isNamedOpenAIStyleProvider(provider)
               ? buildNamedOpenAiStyleHeaders(provider, token)
               : buildOptionalBearerHeaders(token),
+            signal,
           });
 
           if (response.ok) {
             const data = await response.json();
-            models = isNamedOpenAIStyleProvider(provider)
+            let endpointModels = isNamedOpenAIStyleProvider(provider)
               ? normalizeOpenAiLikeModelsResponse(data, provider)
               : data.data || data.models || [];
             if (provider === "ollama-local")
-              models = await enrichOllamaLocalModels(models, baseUrl, proxy, token);
-            break; // Success!
+              endpointModels = await enrichOllamaLocalModels(endpointModels, baseUrl, proxy, token);
+            return { ok: true, models: endpointModels };
           }
 
           if (response.status === 401 || response.status === 403) {
-            lastErrorStatus = response.status;
-            throw new Error("auth_failed");
+            return { ok: false, authStatus: response.status };
           }
+
+          return { ok: false };
         } catch (err: any) {
-          if (err.message === "auth_failed") break; // Don't try other endpoints if auth failed
-
+          if (signal?.aborted) return { ok: false };
           if (err?.code === "REDIRECT_BLOCKED") {
-            continue; // Try next endpoint
+            return { ok: false };
           }
-
           const status = getSafeOutboundFetchErrorStatus(err);
-          if (status) {
-            throw err;
+          return { ok: false, fatalError: status ? err : null };
+        }
+      };
+
+      // Probe primary endpoint first
+      const primaryResult = await probeSingle(uniqueEndpoints[0]);
+      if (primaryResult.ok && primaryResult.models) {
+        models = primaryResult.models;
+      } else if (primaryResult.authStatus) {
+        lastErrorStatus = primaryResult.authStatus;
+      } else {
+        if (primaryResult.fatalError) {
+          fatalGuardError = primaryResult.fatalError;
+        }
+        // If primary failed and there are candidate fallback endpoints, probe them in parallel
+        const fallbacks = uniqueEndpoints.slice(1);
+        if (fallbacks.length > 0) {
+          const abortController = new AbortController();
+          let fallbackAuthStatus: number | null = null;
+          const fallbackResults = await Promise.allSettled(
+            fallbacks.map(async (url) => {
+              const res = await probeSingle(url, abortController.signal);
+              if (res.ok && res.models) {
+                abortController.abort();
+                return res.models;
+              }
+              if (res.authStatus) {
+                fallbackAuthStatus = res.authStatus;
+                abortController.abort();
+              }
+              if (res.fatalError && !fatalGuardError) {
+                fatalGuardError = res.fatalError;
+              }
+              return null;
+            })
+          );
+
+          if (fallbackAuthStatus) {
+            lastErrorStatus = fallbackAuthStatus;
+          } else {
+            for (const res of fallbackResults) {
+              if (res.status === "fulfilled" && res.value) {
+                models = res.value;
+                break;
+              }
+            }
           }
+        }
+        if (!models && !lastErrorStatus && fatalGuardError) {
+          throw fatalGuardError;
         }
       }
 
@@ -974,10 +1023,12 @@ export async function GET(
       ];
 
       let lastStatus = 0;
-      for (const modelsUrl of discoveryUrls) {
-        let response: Response;
+      const abortController = new AbortController();
+      let discoveryError: unknown = null;
+
+      const probeAzureAi = async (modelsUrl: string) => {
         try {
-          response = await safeOutboundFetch(modelsUrl, {
+          const response = await safeOutboundFetch(modelsUrl, {
             ...SAFE_OUTBOUND_FETCH_PRESETS.modelsDiscovery,
             guard: getProviderOutboundGuard(),
             proxyConfig: proxy,
@@ -986,25 +1037,47 @@ export async function GET(
               "Content-Type": "application/json",
               "api-key": token,
             },
+            signal: abortController.signal,
           });
-        } catch (error) {
-          const fallback = buildDiscoveryErrorFallbackResponse(error, {
-            cacheWarning: "Azure AI models API unavailable — using cached catalog",
-            localWarning: "Azure AI models API unavailable — using local catalog",
-          });
-          if (fallback) return fallback;
-          throw error;
-        }
 
-        if (response.ok) {
-          const normalized = normalizeAzureModelsResponse(await response.json(), "azure-ai");
-          if (normalized.length > 0) {
-            return buildApiDiscoveryResponse(normalized);
+          if (response.ok) {
+            const normalized = normalizeAzureModelsResponse(await response.json(), "azure-ai");
+            if (normalized.length > 0) {
+              abortController.abort();
+              return { url: modelsUrl, normalized };
+            }
           }
-        }
 
-        lastStatus = response.status;
-        if (response.status === 401 || response.status === 403) break;
+          lastStatus = response.status;
+          if (response.status === 401 || response.status === 403) {
+            abortController.abort();
+          }
+          return null;
+        } catch (error) {
+          if (!abortController.signal.aborted && !discoveryError) {
+            discoveryError = error;
+          }
+          return null;
+        }
+      };
+
+      const azureAiResults = await Promise.allSettled(
+        discoveryUrls.map((url) => probeAzureAi(url))
+      );
+
+      for (const res of azureAiResults) {
+        if (res.status === "fulfilled" && res.value?.normalized) {
+          return buildApiDiscoveryResponse(res.value.normalized);
+        }
+      }
+
+      if (discoveryError && !lastStatus) {
+        const fallback = buildDiscoveryErrorFallbackResponse(discoveryError, {
+          cacheWarning: "Azure AI models API unavailable — using cached catalog",
+          localWarning: "Azure AI models API unavailable — using local catalog",
+        });
+        if (fallback) return fallback;
+        throw discoveryError;
       }
 
       const fallback = buildDiscoveryFallbackResponse({
@@ -1054,10 +1127,12 @@ export async function GET(
       ];
 
       let lastStatus = 0;
-      for (const modelsUrl of discoveryUrls) {
-        let response: Response;
+      const abortController = new AbortController();
+      let discoveryError: unknown = null;
+
+      const probeAzureOpenAi = async (modelsUrl: string) => {
         try {
-          response = await safeOutboundFetch(modelsUrl, {
+          const response = await safeOutboundFetch(modelsUrl, {
             ...SAFE_OUTBOUND_FETCH_PRESETS.modelsDiscovery,
             guard: getProviderOutboundGuard(),
             proxyConfig: proxy,
@@ -1066,24 +1141,48 @@ export async function GET(
               "Content-Type": "application/json",
               "api-key": token,
             },
+            signal: abortController.signal,
           });
+
+          if (response.ok) {
+            const normalized = normalizeOpenAiLikeModelsResponse(
+              await response.json(),
+              "azure-openai"
+            );
+            abortController.abort();
+            return { url: modelsUrl, normalized };
+          }
+
+          lastStatus = response.status;
+          if (response.status === 401 || response.status === 403) {
+            abortController.abort();
+          }
+          return null;
         } catch (error) {
-          const fallback = buildDiscoveryErrorFallbackResponse(error, {
-            cacheWarning: "Azure OpenAI models API unavailable — using cached catalog",
-            localWarning: "Azure OpenAI models API unavailable — using local catalog",
-          });
-          if (fallback) return fallback;
-          throw error;
+          if (!abortController.signal.aborted && !discoveryError) {
+            discoveryError = error;
+          }
+          return null;
         }
+      };
 
-        if (response.ok) {
-          return buildApiDiscoveryResponse(
-            normalizeOpenAiLikeModelsResponse(await response.json(), "azure-openai")
-          );
+      const azureOpenAiResults = await Promise.allSettled(
+        discoveryUrls.map((url) => probeAzureOpenAi(url))
+      );
+
+      for (const res of azureOpenAiResults) {
+        if (res.status === "fulfilled" && res.value?.normalized) {
+          return buildApiDiscoveryResponse(res.value.normalized);
         }
+      }
 
-        lastStatus = response.status;
-        if (response.status === 401 || response.status === 403) break;
+      if (discoveryError && !lastStatus) {
+        const fallback = buildDiscoveryErrorFallbackResponse(discoveryError, {
+          cacheWarning: "Azure OpenAI models API unavailable — using cached catalog",
+          localWarning: "Azure OpenAI models API unavailable — using local catalog",
+        });
+        if (fallback) return fallback;
+        throw discoveryError;
       }
 
       const fallback = buildDiscoveryFallbackResponse({
@@ -1481,26 +1580,42 @@ export async function GET(
 
       let response: Response | null = null;
       try {
-        for (const target of discoveryTargets) {
-          response = await safeOutboundFetch(target.url, {
-            ...SAFE_OUTBOUND_FETCH_PRESETS.modelsDiscovery,
-            guard: getProviderOutboundGuard(),
-            proxyConfig: proxy,
-            method: "GET",
-            headers:
-              target.transport === "openai"
-                ? token
-                  ? buildGlmCodingHeaders(token, false)
-                  : { "Content-Type": "application/json", Accept: "application/json" }
-                : {
-                    "Content-Type": "application/json",
-                    Accept: "application/json",
-                    ...(token ? { "x-api-key": token } : {}),
-                    "anthropic-version": "2023-06-01",
-                  },
-          });
-          if (response.ok) break;
-          if (response.status === 401 || response.status === 403) break;
+        const abortController = new AbortController();
+        const probeGlm = async (target: (typeof discoveryTargets)[number]) => {
+          try {
+            const res = await safeOutboundFetch(target.url, {
+              ...SAFE_OUTBOUND_FETCH_PRESETS.modelsDiscovery,
+              guard: getProviderOutboundGuard(),
+              proxyConfig: proxy,
+              method: "GET",
+              headers:
+                target.transport === "openai"
+                  ? token
+                    ? buildGlmCodingHeaders(token, false)
+                    : { "Content-Type": "application/json", Accept: "application/json" }
+                  : {
+                      "Content-Type": "application/json",
+                      Accept: "application/json",
+                      ...(token ? { "x-api-key": token } : {}),
+                      "anthropic-version": "2023-06-01",
+                    },
+              signal: abortController.signal,
+            });
+            if (res.ok || res.status === 401 || res.status === 403) {
+              abortController.abort();
+            }
+            return res;
+          } catch (_err) {
+            return null;
+          }
+        };
+
+        const glmResults = await Promise.allSettled(discoveryTargets.map((t) => probeGlm(t)));
+        for (const res of glmResults) {
+          if (res.status === "fulfilled" && res.value) {
+            response = res.value;
+            if (response.ok || response.status === 401 || response.status === 403) break;
+          }
         }
       } catch (error) {
         const fallback = buildDiscoveryErrorFallbackResponse(error);

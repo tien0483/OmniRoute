@@ -1,7 +1,13 @@
+import dns from "node:dns";
 // Polyfill worker_threads.markAsUncloneable for Node.js < 21 compatibility (specifically Node 20.20.2)
 import worker_threads from "node:worker_threads";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { WebSocket } from "ws";
+
+// Enforce ipv4first process-wide to avoid Windows localhost IPv6 resolution delay
+if (typeof dns.setDefaultResultOrder === "function") {
+  dns.setDefaultResultOrder("ipv4first");
+}
 
 // Next 16 reads AsyncLocalStorage from globalThis in its server runtime. Node
 // provides that global, while Bun exposes the implementation through

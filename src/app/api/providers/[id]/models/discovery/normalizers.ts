@@ -175,10 +175,13 @@ export async function fetchAntigravityDiscoveryModelsCached(
       );
     }
 
-    for (const discoveryUrl of [
+    const discoveryUrls = [
       ...getAntigravityFetchAvailableModelsUrls(),
       ...getAntigravityModelsDiscoveryUrls(),
-    ]) {
+    ];
+
+    const abortController = new AbortController();
+    const probeCandidate = async (discoveryUrl: string) => {
       try {
         const response = await safeOutboundFetch(discoveryUrl, {
           ...SAFE_OUTBOUND_FETCH_PRESETS.modelsDiscovery,
@@ -187,6 +190,7 @@ export async function fetchAntigravityDiscoveryModelsCached(
           method: "POST",
           headers: getAntigravityContentHeaders(profile, accessToken),
           body: JSON.stringify({}),
+          signal: abortController.signal,
         });
 
         if (!response.ok) {
@@ -194,7 +198,7 @@ export async function fetchAntigravityDiscoveryModelsCached(
           console.warn(
             `[models] ${provider} discovery failed at ${discoveryUrl} (${response.status}): ${errorText}`
           );
-          continue;
+          return null;
         }
 
         const models = filterUserCallableAntigravityModels(
@@ -202,11 +206,23 @@ export async function fetchAntigravityDiscoveryModelsCached(
           provider
         ).map((model) => mapAntigravityModelForClient(model, provider));
         if (models.length > 0) {
+          abortController.abort();
           return models;
         }
+        return null;
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        console.warn(`[models] ${provider} discovery threw for ${discoveryUrl}: ${message}`);
+        if (!abortController.signal.aborted) {
+          const message = error instanceof Error ? error.message : String(error);
+          console.warn(`[models] ${provider} discovery threw for ${discoveryUrl}: ${message}`);
+        }
+        return null;
+      }
+    };
+
+    const results = await Promise.allSettled(discoveryUrls.map((url) => probeCandidate(url)));
+    for (const result of results) {
+      if (result.status === "fulfilled" && result.value && result.value.length > 0) {
+        return result.value;
       }
     }
 

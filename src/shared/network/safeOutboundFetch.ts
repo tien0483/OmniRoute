@@ -18,23 +18,20 @@ const DEFAULT_IDEMPOTENT_METHODS = ["GET", "HEAD", "OPTIONS", "PUT", "DELETE"];
 // change; default raised from 5000ms to 8000ms to give slow-but-healthy providers headroom.
 function resolveProbeTimeoutMs(): number {
   const parsed = parseInt(process.env.OMNIROUTE_PROVIDER_PROBE_TIMEOUT_MS || "", 10);
-  return Number.isFinite(parsed) && parsed >= 1000 ? parsed : 8000;
+  return Number.isFinite(parsed) && parsed >= 1000 ? parsed : 2500;
 }
 const PROVIDER_PROBE_TIMEOUT_MS = resolveProbeTimeoutMs();
 
 export type SafeOutboundFetchGuard = OutboundUrlGuardMode;
 export type SafeOutboundFetchErrorCode =
-  | "INVALID_URL"
-  | "URL_GUARD_BLOCKED"
-  | "TIMEOUT"
-  | "REDIRECT_BLOCKED"
-  | "NETWORK_ERROR";
+  "INVALID_URL" | "URL_GUARD_BLOCKED" | "TIMEOUT" | "REDIRECT_BLOCKED" | "NETWORK_ERROR";
 
 export interface SafeOutboundFetchRetryOptions {
   attempts?: number;
   backoffMs?: number | number[];
   methods?: string[];
   statusCodes?: number[];
+  retryOnTimeout?: boolean;
 }
 
 export interface SafeOutboundFetchOptions extends RequestInit {
@@ -61,11 +58,7 @@ export const SAFE_OUTBOUND_FETCH_PRESETS: SafeOutboundFetchPresetMap = {
   validationRead: {
     timeoutMs: PROVIDER_PROBE_TIMEOUT_MS,
     allowRedirect: false,
-    retry: {
-      attempts: 2,
-      backoffMs: [150],
-      methods: ["GET", "HEAD"],
-    },
+    retry: false,
   },
   validationWrite: {
     timeoutMs: 15000,
@@ -79,16 +72,13 @@ export const SAFE_OUTBOUND_FETCH_PRESETS: SafeOutboundFetchPresetMap = {
       attempts: 2,
       backoffMs: [150],
       methods: ["GET", "HEAD"],
+      retryOnTimeout: false,
     },
   },
   modelsDiscovery: {
-    timeoutMs: 10000,
+    timeoutMs: 3000,
     allowRedirect: false,
-    retry: {
-      attempts: 2,
-      backoffMs: [200],
-      methods: ["GET", "HEAD"],
-    },
+    retry: false,
   },
   modelsPagination: {
     timeoutMs: 15000,
@@ -202,6 +192,7 @@ function getRetryConfig(retry: SafeOutboundFetchRetryOptions | false | undefined
       shouldRetryMethod: false,
       statusCodes: new Set<number>(),
       backoffMs: [] as number[],
+      retryOnTimeout: false,
     };
   }
 
@@ -215,12 +206,14 @@ function getRetryConfig(retry: SafeOutboundFetchRetryOptions | false | undefined
       ? [retry.backoffMs]
       : [];
   const statusCodes = new Set(retry?.statusCodes || []);
+  const retryOnTimeout = retry?.retryOnTimeout === true;
 
   return {
     attempts,
     shouldRetryMethod: methods.has(method),
     statusCodes,
     backoffMs,
+    retryOnTimeout,
   };
 }
 
@@ -246,7 +239,8 @@ function normalizeFetchFailure(
   error: unknown,
   targetUrl: string,
   method: string,
-  attempts: number
+  attempts: number,
+  retryOnTimeout: boolean = false
 ): SafeOutboundFetchError {
   if (error instanceof SafeOutboundFetchError) {
     error.attempts = attempts;
@@ -260,7 +254,7 @@ function normalizeFetchFailure(
       method,
       attempts,
       timeoutMs: error.timeoutMs,
-      isRetryable: true,
+      isRetryable: retryOnTimeout,
       cause: error,
     });
   }
@@ -345,7 +339,13 @@ export async function safeOutboundFetch(url: string | URL, options: SafeOutbound
 
       return response;
     } catch (error) {
-      const normalizedError = normalizeFetchFailure(error, targetUrl.toString(), method, attempt);
+      const normalizedError = normalizeFetchFailure(
+        error,
+        targetUrl.toString(),
+        method,
+        attempt,
+        retryConfig.retryOnTimeout
+      );
       const shouldRetry =
         retryConfig.shouldRetryMethod &&
         attempt < retryConfig.attempts &&

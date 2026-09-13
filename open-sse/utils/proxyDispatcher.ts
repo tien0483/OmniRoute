@@ -72,7 +72,7 @@ function getDispatcherOptions() {
     // the spurious missing-`port` error, mirroring the `proxyTls` cast below.
     connect: {
       autoSelectFamily: true,
-      autoSelectFamilyAttemptTimeout: 1000,
+      autoSelectFamilyAttemptTimeout: 250,
     } as ProxyAgent.Options["proxyTls"],
   };
 }
@@ -248,8 +248,7 @@ function normalizePort(port: string | number | null | undefined, protocol: strin
  * listen on these ports, so we must always include the port explicitly.
  */
 function buildProxyUrlString(parsed: URL, port: string): string {
-  const auth =
-    parsed.username || parsed.password ? `${parsed.username}:${parsed.password}@` : "";
+  const auth = parsed.username || parsed.password ? `${parsed.username}:${parsed.password}@` : "";
   return `${parsed.protocol}//${auth}${parsed.hostname}:${port}`;
 }
 
