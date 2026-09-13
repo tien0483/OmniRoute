@@ -18,7 +18,7 @@ import { sanitizeProviderSpecificDataForResponse } from "@/lib/providers/request
 
 /**
  * Resolve the Antigravity CLI token-file path. Checks process.env.AGY_TOKEN_FILE override,
- * then checks ~/.gemini/accounts/*/oauth_creds.json, ~/.gemini/oauth_creds.json, and
+ * then checks ~/.gemini/accounts/<id>/oauth_creds.json, ~/.gemini/oauth_creds.json, and
  * ~/.gemini/antigravity-cli paths, choosing the newest existing file.
  * Defaults to ~/.gemini/antigravity-cli/antigravity-oauth-token.
  */
