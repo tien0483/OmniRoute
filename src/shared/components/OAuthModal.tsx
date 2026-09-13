@@ -1074,9 +1074,13 @@ export default function OAuthModal({
                 : provider === "grok-cli"
                   ? t("grokAuthJsonDescription")
                   : provider === "agy" || provider === "antigravity"
-                    ? (typeof (t as any).has === "function" && (t as any).has("agyAuthJsonDescription")
-                        ? t("agyAuthJsonDescription")
-                        : "Paste the full contents of ~/.gemini/oauth_creds.json or your agy token file.")
+                    ? typeof (t as unknown as { has?: (k: string) => boolean }).has ===
+                        "function" &&
+                      (t as unknown as { has: (k: string) => boolean }).has(
+                        "agyAuthJsonDescription"
+                      )
+                      ? t("agyAuthJsonDescription")
+                      : "Paste the full contents of ~/.gemini/oauth_creds.json or your agy token file."
                     : t("devinPasteDescription")}
             </p>
             {provider === "grok-cli" || provider === "agy" || provider === "antigravity" ? (
@@ -1174,10 +1178,10 @@ export default function OAuthModal({
                 placeholderUrl={placeholderUrl}
                 canSubmit={Boolean(
                   callbackUrl &&
-                    (authData ||
-                      isCredentialBlob(callbackUrl) ||
-                      ((provider === "agy" || provider === "antigravity") &&
-                        looksLikeAgyTokenJson(callbackUrl)))
+                  (authData ||
+                    isCredentialBlob(callbackUrl) ||
+                    ((provider === "agy" || provider === "antigravity") &&
+                      looksLikeAgyTokenJson(callbackUrl)))
                 )}
                 onCallbackUrlChange={setCallbackUrl}
                 onSubmit={handleManualSubmit}

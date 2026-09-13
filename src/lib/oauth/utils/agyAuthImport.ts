@@ -50,6 +50,9 @@ export interface ParsedAgyAuth {
   tokenType: string;
   expiresAt: string | null;
   authMethod: string | null;
+  idToken?: string | null;
+  idTokenEmail?: string | null;
+  idTokenName?: string | null;
 }
 
 export interface EnrichedAgyAuth extends ParsedAgyAuth {
@@ -68,8 +71,8 @@ export interface CreateAgyConnectionOptions {
 
 /**
  * Parse the Antigravity CLI (`agy`) token file. It nests the token under `.token`,
- * uses an ISO `expiry` string, and has NO `id_token`. A flat top-level shape is
- * accepted as a fallback.
+ * uses an ISO `expiry` string, and can carry an `id_token` (JWT with email/name).
+ * A flat top-level shape is accepted as a fallback.
  */
 export function parseAndValidateAgyToken(raw: unknown): ParsedAgyAuth {
   const doc = toRecord(raw);
@@ -108,7 +111,33 @@ export function parseAndValidateAgyToken(raw: unknown): ParsedAgyAuth {
   const tokenType = toNonEmptyString(token.token_type) ?? "Bearer";
   const authMethod = toNonEmptyString(doc.auth_method) ?? toNonEmptyString(token.auth_method);
 
-  return { accessToken, refreshToken, tokenType, expiresAt, authMethod };
+  const rawIdToken = toNonEmptyString(token.id_token) ?? toNonEmptyString(doc.id_token);
+  let idTokenEmail: string | null = null;
+  let idTokenName: string | null = null;
+  if (rawIdToken) {
+    try {
+      const parts = rawIdToken.split(".");
+      if (parts.length >= 2) {
+        const payloadJson = Buffer.from(parts[1], "base64url").toString("utf8");
+        const payload = JSON.parse(payloadJson);
+        idTokenEmail = toNonEmptyString(payload.email);
+        idTokenName = toNonEmptyString(payload.name);
+      }
+    } catch {
+      // best effort
+    }
+  }
+
+  return {
+    accessToken,
+    refreshToken,
+    tokenType,
+    expiresAt,
+    authMethod,
+    idToken: rawIdToken,
+    idTokenEmail,
+    idTokenName,
+  };
 }
 
 // ──── Enrich with the Antigravity Code Assist backend ─────────────────────────
@@ -121,24 +150,26 @@ export function parseAndValidateAgyToken(raw: unknown): ParsedAgyAuth {
 export async function enrichWithAntigravityBackend(
   parsed: ParsedAgyAuth
 ): Promise<EnrichedAgyAuth> {
-  let email: string | null = null;
+  let email: string | null = parsed.idTokenEmail ?? null;
   let projectId: string | null = null;
   let tier: string | null = null;
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 8000);
-  try {
-    const userInfoRes = await fetch(`${AGY_CONFIG.userInfoUrl}?alt=json`, {
-      headers: { Authorization: `Bearer ${parsed.accessToken}` },
-      signal: controller.signal,
-    });
-    if (userInfoRes.ok) {
-      email = toNonEmptyString(toRecord(await userInfoRes.json()).email);
+  if (!email) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8000);
+    try {
+      const userInfoRes = await fetch(`${AGY_CONFIG.userInfoUrl}?alt=json`, {
+        headers: { Authorization: `Bearer ${parsed.accessToken}` },
+        signal: controller.signal,
+      });
+      if (userInfoRes.ok) {
+        email = toNonEmptyString(toRecord(await userInfoRes.json()).email);
+      }
+    } catch {
+      // best effort — email stays null
+    } finally {
+      clearTimeout(timer);
     }
-  } catch {
-    // best effort — email stays null
-  } finally {
-    clearTimeout(timer);
   }
 
   const loadController = new AbortController();
@@ -172,20 +203,35 @@ export async function enrichWithAntigravityBackend(
     clearTimeout(loadTimer);
   }
 
+  // Antigravity CLI default fallback if loadCodeAssist was blocked or timed out
+  if (!projectId) {
+    projectId = "aicode-consumers";
+  }
+  if (!tier) {
+    tier = "g1-pro-tier";
+  }
+
   return { ...parsed, email, projectId, tier };
 }
 
 // ──── Find existing connection ────────────────────────────────────────────────
 
-export async function findExistingAgyConnection(email: string): Promise<JsonRecord | null> {
+export async function findExistingAgyConnection(email?: string | null): Promise<JsonRecord | null> {
   const connections = await getProviderConnections({ provider: "agy" });
-  const lowerEmail = email.toLowerCase();
-  return (
-    (connections.find((c) => {
+  if (email) {
+    const lowerEmail = email.toLowerCase();
+    const match = connections.find((c) => {
       const conn = c as JsonRecord;
       return toNonEmptyString(conn.email)?.toLowerCase() === lowerEmail;
-    }) as JsonRecord | undefined) ?? null
-  );
+    }) as JsonRecord | undefined;
+    if (match) return match;
+  }
+  // If no email or no exact email match, and there is only 1 connection on the agy provider,
+  // associate with that connection rather than creating duplicate orphan rows.
+  if (connections.length === 1) {
+    return (connections[0] as JsonRecord) ?? null;
+  }
+  return null;
 }
 
 // ──── Create / update connection ──────────────────────────────────────────────
@@ -194,60 +240,67 @@ export async function createConnectionFromAgyToken(
   enriched: EnrichedAgyAuth,
   options: CreateAgyConnectionOptions
 ): Promise<{ connection: JsonRecord; created: boolean }> {
-  const resolvedEmail = options.email || enriched.email;
+  const resolvedEmail = options.email || enriched.email || enriched.idTokenEmail || null;
+  const resolvedName =
+    options.name || enriched.idTokenName || resolvedEmail || "Antigravity CLI (imported)";
 
-  if (resolvedEmail) {
-    const existing = await findExistingAgyConnection(resolvedEmail);
-    if (existing) {
-      if (!options.overwriteExisting) {
-        throw new AgyAuthFileError(
-          "An Antigravity CLI connection for this account already exists. Pass overwriteExisting: true to replace it.",
-          409,
-          "duplicate_account"
-        );
-      }
-
-      const degradedProject = antigravityDegradedProjectState("agy", {
-        projectId: enriched.projectId ?? "",
-        providerSpecificData: { projectId: enriched.projectId ?? "", clientProfile: "cli" },
-      });
-
-      const updated = await updateProviderConnection(existing.id as string, {
-        accessToken: enriched.accessToken,
-        refreshToken: enriched.refreshToken,
-        expiresAt: enriched.expiresAt,
-        email: resolvedEmail || (existing.email as string | undefined),
-        name:
-          options.name ||
-          (existing.name as string | undefined) ||
-          resolvedEmail ||
-          "Antigravity CLI (imported)",
-        ...antigravityPersistStatus(degradedProject),
-        isActive: true,
-        providerSpecificData: {
-          // Auto-sync default for newly discovered backends — see
-          // mapAntigravityTokens. Placed BEFORE the existing-data spread so a
-          // previously persisted operator choice (true or false) wins.
-          autoSync: true,
-          ...toRecord(existing.providerSpecificData),
-          clientProfile: "cli",
-          tokenType: enriched.tokenType,
-          authMethod: enriched.authMethod,
-          // CLI tokens are issued by the public Antigravity desktop client.
-          // A prior dashboard OAuth against ANTIGRAVITY_OAUTH_CLIENT_ID=web
-          // leaves oauthClient=custom:... on the row; spreading that marker
-          // would refresh the CLI token against the wrong Google client
-          // (401 unauthorized_client) after the imported access token expires.
-          oauthClient: "builtin",
-          projectId: enriched.projectId ?? toRecord(existing.providerSpecificData).projectId,
-          tier: enriched.tier ?? toRecord(existing.providerSpecificData).tier,
-          importedAt: new Date().toISOString(),
-        },
-      });
-
-      return { connection: updated || existing, created: false };
+  const existing = await findExistingAgyConnection(resolvedEmail);
+  if (existing) {
+    if (!options.overwriteExisting) {
+      throw new AgyAuthFileError(
+        "An Antigravity CLI connection for this account already exists. Pass overwriteExisting: true to replace it.",
+        409,
+        "duplicate_account"
+      );
     }
-  } else if (!options.overwriteExisting) {
+
+    const effectiveProjectId =
+      enriched.projectId ?? toRecord(existing.providerSpecificData).projectId ?? "aicode-consumers";
+    const effectiveTier =
+      enriched.tier ?? toRecord(existing.providerSpecificData).tier ?? "g1-pro-tier";
+
+    const degradedProject = antigravityDegradedProjectState("agy", {
+      projectId: effectiveProjectId as string,
+      providerSpecificData: { projectId: effectiveProjectId as string, clientProfile: "cli" },
+    });
+
+    const updated = await updateProviderConnection(existing.id as string, {
+      accessToken: enriched.accessToken,
+      refreshToken: enriched.refreshToken,
+      expiresAt: enriched.expiresAt,
+      email: resolvedEmail || (existing.email as string | undefined),
+      name:
+        options.name ||
+        resolvedName ||
+        (existing.name as string | undefined) ||
+        "Antigravity CLI (imported)",
+      ...antigravityPersistStatus(degradedProject),
+      isActive: true,
+      providerSpecificData: {
+        // Auto-sync default for newly discovered backends — see
+        // mapAntigravityTokens. Placed BEFORE the existing-data spread so a
+        // previously persisted operator choice (true or false) wins.
+        autoSync: true,
+        ...toRecord(existing.providerSpecificData),
+        clientProfile: "cli",
+        tokenType: enriched.tokenType,
+        authMethod: enriched.authMethod,
+        // CLI tokens are issued by the public Antigravity desktop client.
+        // A prior dashboard OAuth against ANTIGRAVITY_OAUTH_CLIENT_ID=web
+        // leaves oauthClient=custom:... on the row; spreading that marker
+        // would refresh the CLI token against the wrong Google client
+        // (401 unauthorized_client) after the imported access token expires.
+        oauthClient: "builtin",
+        projectId: effectiveProjectId,
+        tier: effectiveTier,
+        importedAt: new Date().toISOString(),
+      },
+    });
+
+    return { connection: updated || existing, created: false };
+  }
+
+  if (!resolvedEmail && !options.overwriteExisting) {
     throw new AgyAuthFileError(
       "Could not verify the account email from the agy token (no userinfo). Pass overwriteExisting: true to import without email verification.",
       409,
@@ -255,16 +308,18 @@ export async function createConnectionFromAgyToken(
     );
   }
 
-  const name = options.name || resolvedEmail || "Antigravity CLI (imported)";
+  const effectiveProjectId = enriched.projectId ?? "aicode-consumers";
+  const effectiveTier = enriched.tier ?? "g1-pro-tier";
+
   const degradedProject = antigravityDegradedProjectState("agy", {
-    projectId: enriched.projectId ?? "",
-    providerSpecificData: { projectId: enriched.projectId ?? "", clientProfile: "cli" },
+    projectId: effectiveProjectId,
+    providerSpecificData: { projectId: effectiveProjectId, clientProfile: "cli" },
   });
 
   const connection = await createProviderConnection({
     provider: "agy",
     authType: "oauth",
-    name,
+    name: resolvedName,
     email: resolvedEmail || undefined,
     accessToken: enriched.accessToken,
     refreshToken: enriched.refreshToken,
@@ -278,8 +333,8 @@ export async function createConnectionFromAgyToken(
       tokenType: enriched.tokenType,
       authMethod: enriched.authMethod,
       oauthClient: "builtin",
-      projectId: enriched.projectId,
-      tier: enriched.tier,
+      projectId: effectiveProjectId,
+      tier: effectiveTier,
       importedAt: new Date().toISOString(),
     },
   });
@@ -288,4 +343,3 @@ export async function createConnectionFromAgyToken(
 }
 
 export { looksLikeAgyTokenJson } from "./agyAuthDetect";
-

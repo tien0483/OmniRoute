@@ -64,8 +64,22 @@ async function loadProviderConnectionsData(
       fetch(connectionsUrl, { cache: "no-store" }),
       fetch("/api/provider-nodes", { cache: "no-store" }),
     ]);
-    const connectionsData = await connectionsRes.json();
-    const nodesData = await nodesRes.json();
+    let connectionsData: any = { connections: [] };
+    if (connectionsRes.ok) {
+      try {
+        connectionsData = await connectionsRes.json();
+      } catch {
+        connectionsData = { connections: [] };
+      }
+    }
+    let nodesData: any = { nodes: [] };
+    if (nodesRes.ok) {
+      try {
+        nodesData = await nodesRes.json();
+      } catch {
+        nodesData = { nodes: [] };
+      }
+    }
     const connections = connectionsRes.ok
       ? (connectionsData.connections || []).filter((c: any) =>
           connectionBelongsToProviderPage(c.provider, providerId)
@@ -83,7 +97,12 @@ async function loadProviderConnectionsData(
           await new Promise((resolve) => setTimeout(resolve, 150));
           const retryRes = await fetch("/api/provider-nodes", { cache: "no-store" });
           if (!retryRes.ok) continue;
-          const retryData = await retryRes.json();
+          let retryData: any = { nodes: [] };
+          try {
+            retryData = await retryRes.json();
+          } catch {
+            retryData = { nodes: [] };
+          }
           node = (retryData.nodes || []).find((entry: any) => entry.id === providerId) || null;
           if (node) break;
         }
