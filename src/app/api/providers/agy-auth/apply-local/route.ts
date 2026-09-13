@@ -17,13 +17,51 @@ import { validateBody, isValidationFailure } from "@/shared/validation/helpers";
 import { sanitizeProviderSpecificDataForResponse } from "@/lib/providers/requestDefaults";
 
 /**
- * Resolve the Antigravity CLI token-file path. The path is fixed (no request input
- * reaches the filesystem APIs); an operator-controlled env override is allowed for
- * non-standard installs. Default: ~/.gemini/antigravity-cli/antigravity-oauth-token.
+ * Resolve the Antigravity CLI token-file path. Checks process.env.AGY_TOKEN_FILE override,
+ * then checks ~/.gemini/accounts/*/oauth_creds.json, ~/.gemini/oauth_creds.json, and
+ * ~/.gemini/antigravity-cli paths, choosing the newest existing file.
+ * Defaults to ~/.gemini/antigravity-cli/antigravity-oauth-token.
  */
-function getAgyTokenFilePath(): string {
+async function findAgyTokenFilePath(): Promise<string> {
   const override = process.env.AGY_TOKEN_FILE;
   if (override && override.trim()) return override.trim();
+
+  const candidatePaths: string[] = [];
+  const accountsDir = path.join(os.homedir(), ".gemini", "accounts");
+  try {
+    const entries = await fs.readdir(accountsDir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        candidatePaths.push(path.join(accountsDir, entry.name, "oauth_creds.json"));
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  candidatePaths.push(
+    path.join(os.homedir(), ".gemini", "oauth_creds.json"),
+    path.join(os.homedir(), ".gemini", "antigravity-cli", "antigravity-oauth-token"),
+    path.join(os.homedir(), ".gemini", "antigravity-cli", "oauth_creds.json")
+  );
+
+  const existingCandidates: { filePath: string; mtimeMs: number }[] = [];
+  for (const candidate of candidatePaths) {
+    try {
+      const st = await fs.stat(candidate);
+      if (st.isFile() && st.size > 0) {
+        existingCandidates.push({ filePath: candidate, mtimeMs: st.mtimeMs });
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  if (existingCandidates.length > 0) {
+    existingCandidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
+    return existingCandidates[0].filePath;
+  }
+
   return path.join(os.homedir(), ".gemini", "antigravity-cli", "antigravity-oauth-token");
 }
 
@@ -62,7 +100,7 @@ export async function POST(request: Request) {
   // any existing connection for the same account unless the caller opts out.
   const { name, email, overwriteExisting = true } = parsedBody.data;
 
-  const tokenPath = getAgyTokenFilePath();
+  const tokenPath = await findAgyTokenFilePath();
   let rawJson: unknown;
   try {
     const content = await fs.readFile(tokenPath, "utf8");

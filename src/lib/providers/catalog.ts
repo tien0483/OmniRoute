@@ -178,6 +178,7 @@ export const STATIC_PROVIDER_CATALOG_RESOLUTION_ORDER: StaticProviderCatalogCate
 ];
 
 const MANAGED_PROVIDER_CONNECTION_CATEGORIES = new Set<StaticProviderCatalogCategory>([
+  "no-auth",
   "apikey",
   "web-cookie",
   "local",

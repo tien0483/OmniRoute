@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   parseAndValidateAgyToken,
   AgyAuthFileError,
+  looksLikeAgyTokenJson,
 } from "../../src/lib/oauth/utils/agyAuthImport.ts";
 
 // Fixture token values are deliberately generic (not `ya29.`/`1//` shaped) so secret
@@ -69,4 +70,28 @@ test("invalid/garbage expiry becomes null rather than throwing", () => {
     token: { access_token: ACCESS, refresh_token: REFRESH, expiry: "not-a-date" },
   });
   assert.equal(parsed.expiresAt, null);
+});
+
+test("looksLikeAgyTokenJson: recognizes nested token shape", () => {
+  const jsonStr = JSON.stringify({
+    token: { access_token: ACCESS, refresh_token: REFRESH },
+  });
+  assert.equal(looksLikeAgyTokenJson(jsonStr), true);
+});
+
+test("looksLikeAgyTokenJson: recognizes flat oauth_creds shape", () => {
+  const jsonStr = JSON.stringify({
+    access_token: ACCESS,
+    refresh_token: REFRESH,
+    expiry_date: 12345678,
+  });
+  assert.equal(looksLikeAgyTokenJson(jsonStr), true);
+});
+
+test("looksLikeAgyTokenJson: rejects bare JWT, invalid JSON, and non-token shapes", () => {
+  assert.equal(looksLikeAgyTokenJson("eyJhbGciOiJSUzI1NiJ9.foo.bar"), false);
+  assert.equal(looksLikeAgyTokenJson("http://localhost:20128/callback?code=abc"), false);
+  assert.equal(looksLikeAgyTokenJson("{invalid json"), false);
+  assert.equal(looksLikeAgyTokenJson(JSON.stringify({ other: "data" })), false);
+  assert.equal(looksLikeAgyTokenJson(""), false);
 });

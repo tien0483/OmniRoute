@@ -51,6 +51,8 @@ type ConnectionsHeaderToolbarProps = {
   onOpenImportClaude: () => void;
   onOpenImportGemini: () => void;
   onOpenImportGrokCli: () => void;
+  onDetectAgyLocal?: () => void;
+  detectingAgyLocal?: boolean;
   t: ProviderMessageTranslator;
 };
 
@@ -99,6 +101,8 @@ export default function ConnectionsHeaderToolbar({
   onOpenImportClaude,
   onOpenImportGemini,
   onOpenImportGrokCli,
+  onDetectAgyLocal,
+  detectingAgyLocal,
   t,
 }: ConnectionsHeaderToolbarProps) {
   return (
@@ -377,6 +381,22 @@ export default function ConnectionsHeaderToolbar({
                     onClick={() => gateConnectionFlow(onOpenImportGrokCli)}
                   >
                     {providerText(t, "importGrokAuth", "Import auth")}
+                  </Button>
+                )}
+                {(providerId === "agy" || providerId === "antigravity") && onDetectAgyLocal && (
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    icon="terminal"
+                    loading={detectingAgyLocal}
+                    onClick={() => gateConnectionFlow(onDetectAgyLocal)}
+                    title={providerText(
+                      t,
+                      "autoDetectAgyTooltip",
+                      "Auto-detect local Antigravity CLI login from ~/.gemini"
+                    )}
+                  >
+                    {providerText(t, "autoDetectAgyButton", "Auto-detect CLI")}
                   </Button>
                 )}
               </>

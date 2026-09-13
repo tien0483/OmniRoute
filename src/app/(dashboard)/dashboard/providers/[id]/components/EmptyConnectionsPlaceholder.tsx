@@ -26,6 +26,8 @@ interface EmptyConnectionsPlaceholderProps {
   onOpenImportClaude: () => void;
   onOpenImportGemini: () => void;
   onOpenImportGrokCli: () => void;
+  onDetectAgyLocal?: () => void;
+  detectingAgyLocal?: boolean;
   t: ProviderMessageTranslator;
 }
 
@@ -46,6 +48,8 @@ export default function EmptyConnectionsPlaceholder({
   onOpenImportClaude,
   onOpenImportGemini,
   onOpenImportGrokCli,
+  onDetectAgyLocal,
+  detectingAgyLocal,
   t,
 }: EmptyConnectionsPlaceholderProps) {
   return (
@@ -122,6 +126,23 @@ export default function EmptyConnectionsPlaceholder({
                   onClick={() => gateConnectionFlow(onOpenImportGrokCli)}
                 >
                   Import auth
+                </Button>
+              )}
+              {(providerId === "agy" || providerId === "antigravity") && onDetectAgyLocal && (
+                <Button
+                  variant="secondary"
+                  icon="terminal"
+                  loading={detectingAgyLocal}
+                  onClick={() => gateConnectionFlow(onDetectAgyLocal)}
+                  title={
+                    typeof t.has === "function" && t.has("autoDetectAgyTooltip")
+                      ? t("autoDetectAgyTooltip")
+                      : "Auto-detect local Antigravity CLI login from ~/.gemini"
+                  }
+                >
+                  {typeof t.has === "function" && t.has("autoDetectAgyButton")
+                    ? t("autoDetectAgyButton")
+                    : "Auto-detect CLI"}
                 </Button>
               )}
             </>

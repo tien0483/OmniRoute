@@ -12,11 +12,16 @@ import {
   OAuthManualInputPanel,
 } from "./OAuthModalPanels";
 import { parseResponseBody, getErrorMessage } from "@/shared/utils/api";
-import { isCredentialBlob, submitCredentialBlob } from "@/shared/components/oauthBlobSubmit";
+import {
+  isCredentialBlob,
+  submitCredentialBlob,
+  submitAgyTokenFile,
+} from "@/shared/components/oauthBlobSubmit";
 import {
   looksLikeCodexSessionJson,
   parseCodexSessionJson,
 } from "@/lib/oauth/utils/codexSessionImport";
+import { looksLikeAgyTokenJson } from "@/lib/oauth/utils/agyAuthDetect";
 import GheConfigStep from "@/shared/components/oauthModal/GheConfigStep";
 import GitlabDuoSetupStep from "@/shared/components/oauthModal/GitlabDuoSetupStep";
 import OAuthErrorStep from "@/shared/components/oauthModal/OAuthErrorStep";
@@ -51,7 +56,13 @@ const DEVICE_CODE_PROVIDERS = new Set([
   "grok-cli",
 ]);
 
-const TOKEN_PASTE_PROVIDERS = new Set(["devin-desktop", "devin-cli", "grok-cli"]);
+const TOKEN_PASTE_PROVIDERS = new Set([
+  "devin-desktop",
+  "devin-cli",
+  "grok-cli",
+  "agy",
+  "antigravity",
+]);
 const IMPORT_TOKEN_ONLY_PROVIDERS = new Set(["devin-desktop", "devin-cli"]);
 
 // POST a bare Codex access token to the access-token-only import endpoint
@@ -280,6 +291,10 @@ export default function OAuthModal({
     setSavingToken(true);
     setError(null);
     try {
+      if (provider === "agy" || provider === "antigravity") {
+        await submitAgyTokenFile(provider, raw, setStep, onSuccess, t("errorSaveFailed"));
+        return;
+      }
       let token: string | Record<string, unknown> = raw;
       if (provider === "grok-cli") {
         const parsed = parseGrokCliPasteToken(raw);
@@ -921,6 +936,21 @@ export default function OAuthModal({
         return;
       }
 
+      // Antigravity CLI: token file JSON pasted directly into manual input field.
+      if (
+        (provider === "agy" || provider === "antigravity") &&
+        looksLikeAgyTokenJson(callbackUrl)
+      ) {
+        await submitAgyTokenFile(
+          provider,
+          callbackUrl,
+          setStep,
+          onSuccess,
+          t("errorImportAccessToken")
+        );
+        return;
+      }
+
       if (!authData) {
         throw new Error(t("errorSessionNotInitialized"));
       }
@@ -1028,12 +1058,14 @@ export default function OAuthModal({
               className={`text-sm px-3 py-1 rounded-t ${showPasteToken ? "font-semibold border-b-2 border-primary text-primary" : "text-text-muted"}`}
               onClick={handlePasteMode}
             >
-              {provider === "grok-cli" ? t("tabImportAuthJson") : t("tabPasteApiKey")}
+              {provider === "grok-cli" || provider === "agy" || provider === "antigravity"
+                ? t("tabImportAuthJson")
+                : t("tabPasteApiKey")}
             </button>
           </div>
         )}
 
-        {/* Paste-token form (Devin Desktop / Devin CLI) */}
+        {/* Paste-token form (Devin Desktop / Devin CLI / Antigravity CLI) */}
         {supportsTokenPaste && showPasteToken && step !== "success" && (
           <div className="flex flex-col gap-3">
             <p className="text-sm text-text-muted">
@@ -1041,15 +1073,27 @@ export default function OAuthModal({
                 ? t("devinDesktopPasteDescription")
                 : provider === "grok-cli"
                   ? t("grokAuthJsonDescription")
-                  : t("devinPasteDescription")}
+                  : provider === "agy" || provider === "antigravity"
+                    ? (typeof (t as any).has === "function" && (t as any).has("agyAuthJsonDescription")
+                        ? t("agyAuthJsonDescription")
+                        : "Paste the full contents of ~/.gemini/oauth_creds.json or your agy token file.")
+                    : t("devinPasteDescription")}
             </p>
-            {provider === "grok-cli" ? (
+            {provider === "grok-cli" || provider === "agy" || provider === "antigravity" ? (
               <textarea
                 className="w-full h-32 p-3 text-sm font-mono bg-input border border-border rounded-md resize-none focus:outline-none focus:ring-2 focus:ring-primary"
                 value={pasteToken}
                 onChange={(e) => setPasteToken(e.target.value)}
-                placeholder={t("grokAuthJsonPlaceholder")}
-                aria-label={t("grokAuthJsonLabel")}
+                placeholder={
+                  provider === "agy" || provider === "antigravity"
+                    ? '{"access_token": "...", "refresh_token": "..."}'
+                    : t("grokAuthJsonPlaceholder")
+                }
+                aria-label={
+                  provider === "agy" || provider === "antigravity"
+                    ? "Antigravity auth.json"
+                    : t("grokAuthJsonLabel")
+                }
               />
             ) : (
               <Input
@@ -1128,7 +1172,13 @@ export default function OAuthModal({
                 authUrl={typeof authData?.authUrl === "string" ? authData.authUrl : ""}
                 callbackUrl={callbackUrl}
                 placeholderUrl={placeholderUrl}
-                canSubmit={Boolean(callbackUrl && (authData || isCredentialBlob(callbackUrl)))}
+                canSubmit={Boolean(
+                  callbackUrl &&
+                    (authData ||
+                      isCredentialBlob(callbackUrl) ||
+                      ((provider === "agy" || provider === "antigravity") &&
+                        looksLikeAgyTokenJson(callbackUrl)))
+                )}
                 onCallbackUrlChange={setCallbackUrl}
                 onSubmit={handleManualSubmit}
                 onClose={handleClose}

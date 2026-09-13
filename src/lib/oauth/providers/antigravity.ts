@@ -51,8 +51,8 @@ type AntigravityPostExchange = {
 
 async function fetchFirstOk(endpoints: string[], init: RequestInit, timeoutMs?: number) {
   let lastError: unknown = null;
-  const signal = timeoutMs ? AbortSignal.timeout(timeoutMs) : init.signal;
   for (const endpoint of endpoints) {
+    const signal = timeoutMs ? AbortSignal.timeout(timeoutMs) : init.signal;
     try {
       const response = await fetch(endpoint, { ...init, signal });
       if (response.ok) return response;
@@ -86,7 +86,7 @@ function buildAntigravityAuthUrl(
     scope: config.scopes.join(" "),
     state,
     access_type: "offline",
-    prompt: "consent",
+    prompt: "select_account consent",
   });
   if (codeChallenge) {
     params.set("code_challenge", codeChallenge);

@@ -184,6 +184,8 @@ const nextConfig = {
       // (#11343). See scripts/build/better-sqlite3-stub-flag.mjs.
       ...betterSqlite3AliasFor(process.env),
       ...minimalBuildAliases,
+      "playwright": "./src/lib/playwright.browser-stub.ts",
+      "playwright-core": "./src/lib/playwright.browser-stub.ts",
     },
     // src/lib/agentSkills/generator.ts builds its fs base path from a runtime
     // `outputDir` parameter (`path.join(process.cwd(), outputDir)`), which is
@@ -359,6 +361,8 @@ const nextConfig = {
     "buffer",
     "util",
     "process",
+    "playwright",
+    "playwright-core",
   ],
   transpilePackages: ["@omniroute/open-sse", "@lobehub/icons", "fumadocs-ui", "fumadocs-core"],
   allowedDevOrigins: ["localhost", "127.0.0.1", "192.168.0.250"],
@@ -461,6 +465,12 @@ const nextConfig = {
         );
       }
     }
+
+    config.plugins.push(
+      new webpack.NormalModuleReplacementPlugin(/^playwright(-core)?$/, (resource) => {
+        resource.request = "./src/lib/playwright.browser-stub.ts";
+      })
+    );
 
     return config;
   },

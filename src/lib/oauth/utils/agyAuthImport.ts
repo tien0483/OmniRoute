@@ -286,3 +286,6 @@ export async function createConnectionFromAgyToken(
 
   return { connection, created: true };
 }
+
+export { looksLikeAgyTokenJson } from "./agyAuthDetect";
+

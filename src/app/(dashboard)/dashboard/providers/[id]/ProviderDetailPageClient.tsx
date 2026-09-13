@@ -94,6 +94,7 @@ export default function ProviderDetailPageClient() {
   const [importClaudeModalOpen, setImportClaudeModalOpen] = useState(false);
   const [importGeminiModalOpen, setImportGeminiModalOpen] = useState(false);
   const [importGrokCliModalOpen, setImportGrokCliModalOpen] = useState(false);
+  const [detectingAgyLocal, setDetectingAgyLocal] = useState(false);
   const [connectingVolcengineAccount, setConnectingVolcengineAccount] = useState(false);
   const isOpenAICompatible = isOpenAICompatibleProvider(providerId);
   const isCcCompatible = isClaudeCodeCompatibleProvider(providerId);
@@ -544,6 +545,29 @@ export default function ProviderDetailPageClient() {
     );
   }
 
+  const handleDetectAgyLocal = async () => {
+    if (detectingAgyLocal) return;
+    setDetectingAgyLocal(true);
+    try {
+      const res = await fetch("/api/providers/agy-auth/apply-local", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ overwriteExisting: true }),
+      });
+      const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+      if (!res.ok) {
+        notify.error(typeof data.error === "string" ? data.error : "Failed to detect local Antigravity CLI login");
+        return;
+      }
+      notify.success("Antigravity CLI login detected and imported successfully");
+      await fetchConnections();
+    } catch (err: unknown) {
+      notify.error((err as Error)?.message || "Failed to detect local Antigravity CLI login");
+    } finally {
+      setDetectingAgyLocal(false);
+    }
+  };
+
   return (
     <div className="flex flex-col gap-8">
       <ProviderPageHeader
@@ -646,6 +670,8 @@ export default function ProviderDetailPageClient() {
             onOpenImportClaude={() => setImportClaudeModalOpen(true)}
             onOpenImportGemini={() => setImportGeminiModalOpen(true)}
             onOpenImportGrokCli={() => setImportGrokCliModalOpen(true)}
+            onDetectAgyLocal={handleDetectAgyLocal}
+            detectingAgyLocal={detectingAgyLocal}
             t={t}
           />
 
@@ -667,6 +693,8 @@ export default function ProviderDetailPageClient() {
               onOpenImportClaude={() => setImportClaudeModalOpen(true)}
               onOpenImportGemini={() => setImportGeminiModalOpen(true)}
               onOpenImportGrokCli={() => setImportGrokCliModalOpen(true)}
+              onDetectAgyLocal={handleDetectAgyLocal}
+              detectingAgyLocal={detectingAgyLocal}
               t={t}
             />
           ) : (

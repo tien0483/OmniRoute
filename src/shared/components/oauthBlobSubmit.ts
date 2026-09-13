@@ -40,3 +40,39 @@ export async function submitCredentialBlob(
   setStep("success");
   onSuccess?.();
 }
+
+/**
+ * POST a pasted Antigravity CLI token file (JSON or text) to the import endpoint.
+ * On success advances the modal to the success step and fires onSuccess; on failure throws.
+ */
+export async function submitAgyTokenFile(
+  provider: string,
+  rawText: string,
+  setStep: (s: string) => void,
+  onSuccess?: () => void,
+  fallbackErrorMessage = "Failed to import Antigravity CLI token"
+): Promise<void> {
+  const trimmed = rawText.trim();
+  let sourcePayload: { kind: "json"; json: unknown } | { kind: "text"; text: string };
+  try {
+    sourcePayload = { kind: "json", json: JSON.parse(trimmed) };
+  } catch {
+    sourcePayload = { kind: "text", text: trimmed };
+  }
+
+  const res = await fetch("/api/providers/agy-auth/import", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      source: sourcePayload,
+      overwriteExisting: true,
+    }),
+  });
+  const data = (await parseResponseBody(res)) as Record<string, unknown>;
+  if (!res.ok) {
+    throw new Error(getErrorMessage(data, res.status, fallbackErrorMessage));
+  }
+  setStep("success");
+  onSuccess?.();
+}
+
