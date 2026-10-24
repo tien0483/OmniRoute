@@ -118,7 +118,7 @@ test("extractApiKey parses bearer headers and isValidApiKey validates persisted 
 });
 
 test("getProviderCredentials identifies synthetic no-auth credentials", async () => {
-  const credentials = await auth.getProviderCredentials("opencode");
+  const credentials = await auth.getProviderCredentials("uncloseai");
 
   assert.equal(credentials?.connectionId, "noauth");
   assert.equal(credentials?.authType, "none");
@@ -765,10 +765,19 @@ test("getProviderCredentials refuses a forced pin outside allowedConnections ins
     }
   );
 
-  // #12080 (supersedes the #8893 fallback): a forced pin that is absent from the
-  // policy-allowed pool keeps its constraint — resolution yields no credential instead
-  // of silently continuing on another connection. The policy-blocked connection must
-  // never be selected, and the allowed one must not be picked behind the caller's back.
+  // #12080/#13879: deny the forced pin without selecting its permitted sibling.
+  // #15889: retain an exact credential-free envelope, with unspecified provenance.
+  assert.deepEqual(selected, {
+    blockedByKeyPolicy: true,
+    blockedCount: 1,
+    connectionRestrictionSources: [],
+  });
+});
+
+test("an inactive allowed account is unavailable, not an API-key permission denial", async () => {
+  const inactive = await seedConnection("openai", { isActive: false });
+  await seedConnection("openai");
+  const selected = await auth.getProviderCredentials("openai", null, [inactive.id]);
   assert.equal(selected, null);
 });
 
@@ -1059,6 +1068,38 @@ test("getProviderCredentials least-used prefers the oldest timestamp when all ac
   const selected = await auth.getProviderCredentials("openai");
 
   assert.equal(selected.connectionId, oldest.id);
+});
+
+test("getProviderCredentials least-used prefers an account without backoff over the least recently used one (#12279)", async () => {
+  await settingsDb.updateSettings({ fallbackStrategy: "least-used" });
+  // Oldest lastUsedAt, but still carrying a backoff from a recent 429.
+  const backedOff = await seedConnection("openai", {
+    name: "least-used-backed-off",
+    priority: 1,
+  });
+  // Used more recently, but healthy.
+  const healthy = await seedConnection("openai", {
+    name: "least-used-healthy",
+    priority: 9,
+  });
+  // createProviderConnection does not persist backoffLevel; write it through
+  // update. rateLimitedUntil in the future keeps the backoff from auto-decaying,
+  // and allowRateLimitedConnections below keeps the account in the pool.
+  await providersDb.updateProviderConnection(backedOff.id, {
+    backoffLevel: 2,
+    rateLimitedUntil: futureIso(),
+    lastUsedAt: new Date(Date.now() - 120_000).toISOString(),
+  });
+  await providersDb.updateProviderConnection(healthy.id, {
+    lastUsedAt: new Date(Date.now() - 1_000).toISOString(),
+  });
+
+  const selected = await auth.getProviderCredentials("openai", null, null, null, {
+    allowRateLimitedConnections: true,
+  });
+
+  assert.equal(selected.connectionId, healthy.id);
+  assert.notEqual(selected.connectionId, backedOff.id);
 });
 
 test("getProviderCredentials cost-optimized selects the lowest priority account", async () => {
@@ -1519,7 +1560,7 @@ test("markAccountUnavailable uses a connection-wide cooldown for non-local 404 e
   const result = await auth.markAccountUnavailable(
     connection.id,
     404,
-    "model not found",
+    "404 page not found",
     "openai",
     "gpt-missing"
   );
@@ -1540,7 +1581,7 @@ test("markAccountUnavailable auto-disables permanently banned accounts when the 
   const result = await auth.markAccountUnavailable(
     connection.id,
     401,
-    "Verify your account to continue",
+    "Your account has been suspended", // #14848: "Verify your account…" is no longer a ban
     "openai",
     "gpt-4o"
   );
@@ -1564,7 +1605,7 @@ test("markAccountUnavailable keeps prepaid API keys active when auto-disable sco
   const result = await auth.markAccountUnavailable(
     connection.id,
     401,
-    "Verify your account to continue",
+    "Your account has been suspended",
     "openai",
     "gpt-4o"
   );
@@ -1590,7 +1631,7 @@ test("markAccountUnavailable still auto-disables OAuth accounts when scope is su
   const result = await auth.markAccountUnavailable(
     connection.id,
     401,
-    "Verify your account to continue",
+    "Your account has been suspended",
     "claude",
     "claude-sonnet"
   );
@@ -1610,7 +1651,7 @@ test("markAccountUnavailable leaves permanently banned accounts active when auto
   const result = await auth.markAccountUnavailable(
     connection.id,
     401,
-    "Verify your account to continue",
+    "Your account has been suspended",
     "openai",
     "gpt-4o"
   );
@@ -1654,7 +1695,7 @@ test("markAccountUnavailable swallows auto-disable persistence errors", async ()
     const result = await auth.markAccountUnavailable(
       connection.id,
       401,
-      "Verify your account to continue",
+      "Your account has been suspended",
       "openai",
       "gpt-4o"
     );

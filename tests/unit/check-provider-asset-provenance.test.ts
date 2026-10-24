@@ -556,7 +556,7 @@ test("repository provider asset manifest covers the audited 142-file snapshot", 
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
   assert.match(
     result.stdout,
-    /142\/142 registered; proven=71 probable=69 unresolved=2; duplicate-groups=1/
+    /142\/142 registered; proven=72 probable=69 unresolved=1; duplicate-groups=1/
   );
 });
 

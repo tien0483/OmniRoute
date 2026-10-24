@@ -10,24 +10,26 @@
  *
  * Schedule:
  *   - Initial delay: 30s after server boot (allows DB migrations to complete)
- *   - Interval: configurable via CREDENTIAL_HEALTH_CHECK_INTERVAL (default 5 min)
+ *   - Interval: configurable via CREDENTIAL_HEALTH_CHECK_INTERVAL (default 60 min)
  *   - Per-connection override: provider_connections.healthCheckInterval (minutes,
  *     0 = never test this connection) paces each connection individually
  *   - Backoff on failure: 5min -> 10min -> 30min -> max 2h
  *   - Resets to default on success
  */
 
+import { setImmediate as yieldToEventLoop } from "node:timers/promises";
+
 import { testSingleConnection } from "@/app/api/providers/[id]/test/route";
 import { getProviderConnections } from "@/lib/db/providers";
 import { getCachedSettings } from "@/lib/db/readCache";
+import { setCredentialHealth, initCredentialCache } from "@/lib/credentialHealth/cache";
+import { runAutoDisabledRevalidation } from "@/lib/credentialHealth/autoDisabledRevalidation";
 import {
-  setCredentialHealth,
-  initCredentialCache,
-} from "@/lib/credentialHealth/cache";
-import {
+  DEFAULT_SWEEP_INTERVAL_MS,
   isCredentialProbeInconclusive,
   resolveInconclusiveProbeRecheckDelayMs,
 } from "@/lib/credentialHealth/probePolicy";
+import { isInRefreshBackoff } from "@/lib/tokenRefreshCircuit";
 import { emit } from "@/lib/events/eventBus";
 import { isAutomatedTestProcess } from "@/shared/utils/testProcess";
 import { SEARCH_VALIDATOR_CONFIGS } from "@/lib/providers/validation/searchProviders";
@@ -129,7 +131,7 @@ export function resolveCredentialHealthSweepInterval(
     const parsed = parseInt(envVal, 10);
     if (!isNaN(parsed) && parsed >= 10_000) return parsed;
   }
-  return 3_600_000; // default 60 min
+  return DEFAULT_SWEEP_INTERVAL_MS;
 }
 
 /**
@@ -142,7 +144,7 @@ function getSweepInterval(): number {
     const parsed = parseInt(envVal, 10);
     if (!isNaN(parsed) && parsed >= 10_000) return parsed;
   }
-  return 3_600_000; // default 60 min
+  return DEFAULT_SWEEP_INTERVAL_MS;
 }
 
 /**
@@ -151,9 +153,9 @@ function getSweepInterval(): number {
  * - `healthCheckInterval <= 0` → null (never test this connection — opt-out)
  * - absent → global sweep cadence (operator resilience setting, else env, else default)
  */
-function getConnIntervalMs(
+export function getConnIntervalMs(
   conn: { healthCheckInterval?: number | null },
-  globalIntervalMs = 300_000
+  globalIntervalMs = DEFAULT_SWEEP_INTERVAL_MS
 ): number | null {
   const minutes = conn.healthCheckInterval;
   if (minutes === null || minutes === undefined) return globalIntervalMs;
@@ -324,14 +326,31 @@ export async function sweep(): Promise<void> {
       globalIntervalMs = resolveCredentialHealthSweepInterval(null);
     }
 
+    // #16190: connections the gateway switched off by itself get a slow, capped
+    // retest (operator-disabled ones never do); a passing one is back on, its
+    // pacing is seeded so the active pass below does not probe it twice, and the
+    // health cache shows it active right away.
+    const revalidation = await runAutoDisabledRevalidation({ sweepIntervalMs: globalIntervalMs });
+    for (const conn of revalidation.reactivated) {
+      const testedAt = Date.now();
+      const intervalMs = getConnIntervalMs(conn, globalIntervalMs) ?? globalIntervalMs;
+      state.perConnTiming.set(conn.id, {
+        lastAttemptAt: testedAt,
+        nextAttemptAt: testedAt + intervalMs,
+      });
+      setCredentialHealth(conn.id, String(conn.provider ?? ""), "active");
+    }
+
     // Get active provider connections only (API-key + OAuth). Disabled
     // connections are excluded from routing and must not consume health-check
-    // concurrency or delay the scheduler with avoidable upstream timeouts.
+    // concurrency or delay the scheduler with avoidable upstream timeouts; the
+    // retest above is the only exception, capped per sweep.
     let connections: Array<{
       id: string;
       provider: string;
       authType?: string;
       healthCheckInterval?: number | null;
+      providerSpecificData?: { refreshCircuit?: { until?: string } } | null;
     }>;
 
     try {
@@ -349,6 +368,7 @@ export async function sweep(): Promise<void> {
         provider: string;
         authType?: string;
         healthCheckInterval?: number | null;
+        providerSpecificData?: { refreshCircuit?: { until?: string } } | null;
       }>;
     } catch (err) {
       console.error(LOG_PREFIX, "Failed to load provider connections:", err);
@@ -365,6 +385,20 @@ export async function sweep(): Promise<void> {
       // Per-connection opt-out: never tested.
       if (intervalMs === null) return false;
       const state_ = getSchedulerState();
+      // Honor the OAuth refresh circuit (#13183): probing a connection whose token
+      // refresh is already in backoff just re-reports the same failure every sweep
+      // and keeps the dashboard red until the window expires or the user re-auths.
+      // Park the next attempt on the circuit's own deadline instead.
+      if (isInRefreshBackoff(conn, now)) {
+        const untilMs = new Date(
+          String(conn.providerSpecificData?.refreshCircuit?.until)
+        ).getTime();
+        state_.perConnTiming.set(conn.id, {
+          lastAttemptAt: state_.perConnTiming.get(conn.id)?.lastAttemptAt ?? now,
+          nextAttemptAt: untilMs,
+        });
+        return false;
+      }
       const timing = state_.perConnTiming.get(conn.id);
       // No timing entry = never tested since boot → due now
       if (!timing) return true;
@@ -386,6 +420,9 @@ export async function sweep(): Promise<void> {
     }
 
     for (const batch of batches) {
+      // Yield so GET /healthz and cached /api/monitoring/health can drain
+      // while this background sweep talks to providers (#12532).
+      await yieldToEventLoop();
       await Promise.allSettled(
         batch.map((conn) =>
           testConnection(conn.id, conn.provider, getConnIntervalMs(conn, globalIntervalMs))

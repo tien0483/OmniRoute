@@ -79,6 +79,14 @@ function BadgeIcon({ icon, earned }: { icon: string | null; earned: boolean }) {
   );
 }
 
+/**
+ * Current daily streak carried by `/api/gamification/level` (#2403). Older or partial
+ * payloads without a `streak` field, or with a non-numeric count, render as no streak.
+ */
+function readStreakCount(data: { streak?: { current?: unknown } | null }): number {
+  return Number(data.streak?.current) || 0;
+}
+
 const RARITY_COLORS: Record<string, string> = {
   common: "text-gray-400 border-gray-500/30",
   uncommon: "text-green-400 border-green-500/30",
@@ -97,7 +105,16 @@ export default function ProfilePage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [selectedBadge, setSelectedBadge] = useState<BadgeDef | null>(null);
-  const [streak] = useState(0); // streak data comes from future API
+
+  useEffect(() => {
+    if (!selectedBadge) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setSelectedBadge(null);
+    };
+    document.addEventListener("keydown", closeOnEscape);
+    return () => document.removeEventListener("keydown", closeOnEscape);
+  }, [selectedBadge]);
+  const [streak, setStreak] = useState(0);
 
   const fetchData = useCallback(async () => {
     try {
@@ -114,6 +131,7 @@ export default function ProfilePage() {
       if (levelRes.ok) {
         const data = await levelRes.json();
         setUserLevel(data.level ?? data);
+        setStreak(readStreakCount(data));
       }
       if (badgesRes.ok) {
         const data = await badgesRes.json();
@@ -216,7 +234,7 @@ export default function ProfilePage() {
                 {tg("levelProgress", { current: level, next: level + 1 })}
               </span>
               <span className="text-text-muted">
-                {xpInCurrentLevel.toLocaleString()} / {xpForNext.toLocaleString()} XP
+                {xpInCurrentLevel.toLocaleString(locale)} / {xpForNext.toLocaleString(locale)} XP
               </span>
             </div>
             <div
@@ -233,7 +251,7 @@ export default function ProfilePage() {
               />
             </div>
             <p className="text-xs text-text-muted mt-1">
-              {tg("totalXpEarned", { count: totalXp.toLocaleString() })}
+              {tg("totalXpEarned", { count: totalXp.toLocaleString(locale) })}
             </p>
           </div>
         </div>
@@ -316,14 +334,21 @@ export default function ProfilePage() {
       {/* Badge Detail Modal */}
       {selectedBadge && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-          <div className="bg-surface border border-border rounded-xl p-6 w-full max-w-md mx-4">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="badge-dialog-title"
+            className="bg-surface border border-border rounded-xl p-6 w-full max-w-md mx-4"
+          >
             <div className="flex items-center justify-between mb-4">
               <div className="flex items-center gap-3">
                 <span className="text-4xl">
                   <BadgeIcon icon={selectedBadge.icon} earned={earnedIds.has(selectedBadge.id)} />
                 </span>
                 <div>
-                  <h2 className="text-lg font-semibold">{translateBadge(selectedBadge, "name")}</h2>
+                  <h2 id="badge-dialog-title" className="text-lg font-semibold">
+                    {translateBadge(selectedBadge, "name")}
+                  </h2>
                   <span
                     className={`text-xs px-2 py-0.5 rounded ${RARITY_COLORS[selectedBadge.rarity] || RARITY_COLORS.common} bg-surface`}
                   >

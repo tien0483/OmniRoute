@@ -3,12 +3,13 @@
  *
  * Inspired by ClawRouter commit 14c83c258 "refactor: extract routing into pluggable RouterStrategy system".
  * Provides a RouterStrategy interface and built-in implementations:
- *   - RulesStrategy (default): wraps the existing 15-factor scoring engine
+ *   - RulesStrategy (default): wraps the existing 16-factor scoring engine
  *   - ScoreStrategy: highest configured weighted score, with explicit exploration
  *   - CostStrategy: always picks cheapest available model
  *   - LatencyStrategy: prioritizes low p95 latency with reliability weighting
  *   - SLAStrategy: prefers candidates that satisfy latency/error/cost SLOs
  *   - LKGPStrategy: tries last known good provider first
+ *   - NadirStrategy: asks Nadir's decision API which model the prompt needs (nadirStrategy.ts)
  */
 
 import type { ProviderCandidate, ScoredProvider, ScoringWeights } from "./scoring.ts";
@@ -17,6 +18,7 @@ import { getTaskFitness } from "./taskFitness.ts";
 import { clamp01 } from "../../utils/number.ts";
 import { rankBySpeed } from "./speedRanking.ts";
 import type { SpeedCandidate } from "./speedRanking.ts";
+import { NadirStrategyImpl, type NadirRoutingConfig } from "./nadirStrategy.ts";
 
 export interface SlaRoutingPolicy {
   targetP95Ms?: number;
@@ -35,6 +37,10 @@ export interface RoutingContext {
   sla?: SlaRoutingPolicy;
   weights?: ScoringWeights;
   explorationRate?: number;
+  /** Raw request `messages`, for request-aware strategies (`nadir`). Untouched by the others. */
+  messages?: unknown;
+  /** The combo's `config.nadir` block; see nadirStrategy.ts. */
+  nadir?: NadirRoutingConfig;
 }
 
 export interface RoutingDecision {
@@ -51,9 +57,15 @@ export interface RouterStrategy {
   readonly name: string;
   readonly description: string;
   select(pool: ProviderCandidate[], context: RoutingContext): RoutingDecision;
+  /**
+   * Optional async twin of `select` for strategies whose decision needs I/O.
+   * `selectWithStrategyAsync` prefers it; `select` must still return a valid
+   * (typically fallback) decision for sync callers.
+   */
+  selectAsync?(pool: ProviderCandidate[], context: RoutingContext): Promise<RoutingDecision>;
 }
 
-// ── RulesStrategy: wraps 15-factor scoring engine ───────────────────────────
+// ── RulesStrategy: wraps 16-factor scoring engine ───────────────────────────
 
 function toSpeedCandidate(c: ProviderCandidate): SpeedCandidate {
   return {
@@ -87,14 +99,14 @@ function toSpeedCandidate(c: ProviderCandidate): SpeedCandidate {
 
 class RulesStrategyImpl implements RouterStrategy {
   readonly name = "rules";
-  readonly description = "15-factor weighted scoring (see DEFAULT_WEIGHTS)";
+  readonly description = "16-factor weighted scoring (see DEFAULT_WEIGHTS)";
 
   select(pool: ProviderCandidate[], context: RoutingContext): RoutingDecision {
     const eligible = pool.filter((c) => c.circuitBreakerState !== "OPEN");
     const ranked: ScoredProvider[] = scorePool(
       eligible.length > 0 ? eligible : pool,
       context.taskType,
-      undefined,
+      context.weights,
       getTaskFitness
     );
     const best = ranked[0];
@@ -387,6 +399,7 @@ strategyRegistry.set("fast", latencyStrategy); // alias
 strategyRegistry.set("sla-aware", slaStrategy);
 strategyRegistry.set("sla", slaStrategy); // alias
 strategyRegistry.set("lkgp", lkgpStrategy);
+strategyRegistry.set("nadir", new NadirStrategyImpl({ fallback: rulesStrategy }));
 
 export function getStrategy(name: string): RouterStrategy {
   const strategy = strategyRegistry.get(name);
@@ -414,4 +427,19 @@ export function selectWithStrategy(
   strategyName = "rules"
 ): RoutingDecision {
   return getStrategy(strategyName).select(pool, context);
+}
+
+/**
+ * Async twin of `selectWithStrategy`: strategies that implement `selectAsync`
+ * (I/O-backed, e.g. `nadir`) get it; every other strategy runs its sync `select`.
+ */
+export async function selectWithStrategyAsync(
+  pool: ProviderCandidate[],
+  context: RoutingContext,
+  strategyName = "rules"
+): Promise<RoutingDecision> {
+  const strategy = getStrategy(strategyName);
+  return strategy.selectAsync
+    ? strategy.selectAsync(pool, context)
+    : strategy.select(pool, context);
 }

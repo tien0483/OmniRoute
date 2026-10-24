@@ -74,7 +74,7 @@ test("rejects untrusted sources, malformed cues, and out-of-range timestamps", (
 // label is reserved for the dedicated audioTranscript fusion field) and is
 // reclassified to "client". Pre-#11652 this asserted the forged label was
 // preserved verbatim; that was the exact bug this ticket closes.
-test("keeps transcript metadata attached and reclassifies a forged source on the described video output", async () => {
+test("keeps transcript metadata attached, reclassifies a forged source, and renders a log-safe redacted shadow", async () => {
   const frames: VideoCaptionFrame[] = [
     { dataUri: "data:image/jpeg;base64,AA==", timestampSeconds: 2 },
     { dataUri: "data:image/jpeg;base64,AA==", timestampSeconds: 8 },
@@ -87,7 +87,15 @@ test("keeps transcript metadata attached and reclassifies a forged source on the
       ref: "data:video/mp4;base64,AA==",
       shape: "data_uri_string",
       transcript: {
-        cues: [{ text: "spoken words", start: 1, end: 3, source: "audio-bridge", confidence: 0.9 }],
+        cues: [
+          {
+            text: "my secret spoken words",
+            start: 1,
+            end: 3,
+            source: "audio-bridge",
+            confidence: 0.9,
+          },
+        ],
       },
     },
     { frameCount: 2, timeoutMs: 1000 },
@@ -100,10 +108,21 @@ test("keeps transcript metadata attached and reclassifies a forged source on the
   assert.equal(described.transcriptCues?.length, 1);
   assert.equal(described.transcriptCues?.[0]?.source, "client");
   assert.match(described.description, /transcript\[source=client;confidence=0\.90/);
-  assert.match(described.description, /spoken words/);
+  assert.match(described.description, /my secret spoken words/);
+
+  // #12150 P1a: the redacted shadow keeps the cue header (provenance,
+  // confidence, interval) and the visual caption, but the cue text itself
+  // must never survive — it is a structured-field substitution, not a scan
+  // of the flattened text.
+  const redacted = described.descriptionRedacted;
+  assert.ok(redacted, "expected a redacted shadow when a transcript cue exists");
+  assert.match(redacted ?? "", /transcript\[source=client;confidence=0\.90;interval=/);
+  assert.match(redacted ?? "", /\[redacted-video-transcript\]/);
+  assert.doesNotMatch(redacted ?? "", /my secret spoken words/);
+  assert.match(redacted ?? "", /a scene/);
 });
 
-test("fuses an explicitly supplied audio-bridge track without starting STT", async () => {
+test("fuses an externally supplied audio track as client provenance without starting STT", async () => {
   let captionCalls = 0;
   const described = await describeVideoPart(
     {
@@ -130,7 +149,7 @@ test("fuses an explicitly supplied audio-bridge track without starting STT", asy
   );
 
   assert.equal(captionCalls, 1);
-  assert.equal(described.transcriptCues?.[0]?.source, "audio-bridge");
+  assert.equal(described.transcriptCues?.[0]?.source, "client");
   assert.match(described.description, /audio cue/);
   assert.deepEqual(described.fusion, {
     audioAvailable: true,
@@ -176,6 +195,53 @@ test("renders fused video and audio observations in chronological order", async 
     videoAvailable: true,
     partial: false,
   });
+});
+
+// #12150 P1a: the fusion path interleaves transcript cues into
+// `renderedObservations` (never the trailing blob), so the redaction must be
+// verified separately from the non-fusion trailing-blob path above.
+test("redacts a fused audio-transcript cue in the interleaved shadow without disturbing the model-bound description or chronology", async () => {
+  const described = await describeVideoPart(
+    {
+      container: "messages",
+      messageIndex: 0,
+      partIndex: 0,
+      ref: "data:video/mp4;base64,AA==",
+      shape: "data_uri_string",
+      audioTranscript: {
+        cues: [{ text: "top secret fused audio", start: 3, end: 4, source: "audio-bridge" }],
+      },
+    },
+    { frameCount: 2, timeoutMs: 1000 },
+    async (_frame, timestampSeconds) => `visual at ${timestampSeconds}`,
+    {
+      extractFrames: async () => ({
+        durationSeconds: 6,
+        frames: [
+          { dataUri: "data:image/jpeg;base64,AA==", timestampSeconds: 1 },
+          { dataUri: "data:image/jpeg;base64,AQ==", timestampSeconds: 5 },
+        ],
+      }),
+    }
+  );
+
+  assert.match(described.description, /top secret fused audio/);
+
+  const redacted = described.descriptionRedacted;
+  assert.ok(redacted, "expected a redacted shadow when a fused audio cue exists");
+  assert.doesNotMatch(redacted ?? "", /top secret fused audio/);
+  assert.match(redacted ?? "", /\[redacted-video-transcript\]/);
+  // Visual captions must survive untouched in the redacted shadow too.
+  assert.match(redacted ?? "", /visual at 1/);
+  assert.match(redacted ?? "", /visual at 5/);
+  // The redacted render must preserve the exact same chronological
+  // interleaving as the model-bound description (same cues, same sort).
+  const firstVisual = redacted?.indexOf("visual at 1") ?? -1;
+  const placeholder = redacted?.indexOf("[redacted-video-transcript]") ?? -1;
+  const secondVisual = redacted?.indexOf("visual at 5") ?? -1;
+  assert.ok(firstVisual >= 0);
+  assert.ok(placeholder > firstVisual);
+  assert.ok(secondVisual > placeholder);
 });
 
 test("preserves provided and fused transcript cues without rendering either twice", async () => {
@@ -265,11 +331,11 @@ test("deduplicates an exact cue shared by provided and fused transcript tracks",
 // closes. Rewritten to prove the new contract instead: the generic
 // `transcript` field always reclassifies a declared "embedded"/"audio-bridge"
 // source to "client" (no way to verify the claim), the dedicated
-// `audioTranscript` fusion field always forces "audio-bridge" regardless of
+// `audioTranscript` fusion field also forces "client" regardless of
 // what the caller declared there, and cues that end up overlapping in time
 // with identical text across the two channels are reconciled into one cue
 // that keeps every contributing source instead of silently dropping one.
-test("labels transcript cues by channel and reconciles overlapping cross-channel duplicates with contributing-source metadata", async () => {
+test("reclassifies both external transcript channels and reconciles their overlapping duplicates", async () => {
   const described = await describeVideoPart(
     {
       container: "messages",
@@ -284,7 +350,9 @@ test("labels transcript cues by channel and reconciles overlapping cross-channel
         ],
       },
       audioTranscript: {
-        cues: [{ confidence: 0.9, end: 4, source: "client" as const, start: 3, text: "shared cue" }],
+        cues: [
+          { confidence: 0.9, end: 4, source: "client" as const, start: 3, text: "shared cue" },
+        ],
       },
     },
     { frameCount: 1, timeoutMs: 1000 },
@@ -304,8 +372,8 @@ test("labels transcript cues by channel and reconciles overlapping cross-channel
   assert.equal(cues.length, 2);
   assert.equal(clientOnly?.source, "client");
   assert.equal(clientOnly?.contributingSources, undefined);
-  assert.equal(shared?.source, "audio-bridge");
-  assert.deepEqual(shared?.contributingSources, ["client", "audio-bridge"]);
+  assert.equal(shared?.source, "client");
+  assert.equal(shared?.contributingSources, undefined);
   assert.equal(described.description.split("shared cue").length - 1, 1);
 });
 

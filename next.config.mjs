@@ -1,6 +1,6 @@
 import createNextIntlPlugin from "next-intl/plugin";
 import { createMDX } from "fumadocs-mdx/next";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { betterSqlite3AliasFor } from "./scripts/build/better-sqlite3-stub-flag.mjs";
 import { mitmManagerAliasFor } from "./scripts/build/mitm-stub-flag.mjs";
@@ -10,6 +10,11 @@ import {
   nonPageRoutePrefixes,
   resolveDashboardEmbedMode,
 } from "./scripts/build/dashboardEmbed.mjs";
+import { shouldBuildStandalone } from "./scripts/build/backendOnlyPages.mjs";
+import {
+  filterKnownInfrastructureWarnings,
+  isNextIntlExtractorDynamicImportWarning,
+} from "./scripts/build/knownBuildWarnings.mjs";
 
 const withNextIntl = createNextIntlPlugin("./src/i18n/request.ts");
 const distDir = process.env.NEXT_DIST_DIR || ".build/next";
@@ -63,45 +68,6 @@ const securityHeaders = [
     value: "max-age=63072000; includeSubDomains; preload",
   },
 ];
-
-function isNextIntlExtractorDynamicImportWarning(warning) {
-  const message = typeof warning === "string" ? warning : warning?.message || "";
-  const resource = warning?.module?.resource || warning?.file || "";
-  const target = "next-intl/dist/esm/production/extractor/format/index.js";
-  return (
-    resource.includes(target) &&
-    (message.includes("import(t)") || message.includes("dependency is an expression"))
-  );
-}
-
-const IGNORED_INFRASTRUCTURE_BUILD_DEPENDENCY_MODULES = [
-  "/node_modules/fumadocs-mdx/dist/load-from-file-",
-  "/node_modules/next-intl/dist/esm/production/extractor/format/index.js",
-];
-
-function isKnownInfrastructureBuildDependencyWarning(args) {
-  const message = args
-    .filter((value) => typeof value === "string")
-    .join(" ")
-    .replaceAll("\\", "/");
-  return (
-    message.includes("webpack.FileSystemInfo") &&
-    message.includes("for build dependencies failed at 'import(") &&
-    message.includes("incorrect cache invalidation") &&
-    IGNORED_INFRASTRUCTURE_BUILD_DEPENDENCY_MODULES.some((modulePath) =>
-      message.includes(modulePath)
-    )
-  );
-}
-
-function filterKnownInfrastructureWarnings(baseConsole) {
-  const filteredConsole = Object.create(baseConsole);
-  filteredConsole.warn = (...args) => {
-    if (isKnownInfrastructureBuildDependencyWarning(args)) return;
-    Reflect.apply(baseConsole.warn, baseConsole, args);
-  };
-  return filteredConsole;
-}
 
 // OMNIROUTE_BUILD_PROFILE=minimal physically removes four optional privileged
 // modules (MITM cert install, Zed keychain import, Cloud Sync, 9router
@@ -220,9 +186,12 @@ const nextConfig = {
       },
     ],
   },
-  output: "standalone",
+  ...(shouldBuildStandalone(process.env) ? { output: "standalone" } : {}),
   compress: true,
   productionBrowserSourceMaps: false,
+  // Issue #67: enable React Compiler — automates memoization, removes manual useCallback/useMemo debt.
+  // See: https://next.dev/blog/react-compiler
+  reactCompiler: true,
   // OmniRoute is a proxy for AI APIs — request bodies routinely include
   // multi-MB payloads (vision models, image edits, base64-encoded files,
   // long chat histories with embedded images). Next.js's Server Action
@@ -288,6 +257,9 @@ const nextConfig = {
       // (better-sqlite3 → node:sqlite → sql.js). Next traces sql-wasm.js but can
       // omit the runtime sql-wasm.wasm asset from the standalone bundle.
       "./node_modules/sql.js/dist/sql-wasm.wasm",
+      // tiktoken is server-externalized below so Node selects its CommonJS entry.
+      // That entry reads the tokenizer WASM beside itself at runtime.
+      "./node_modules/tiktoken/tiktoken_bg.wasm",
     ],
   },
   outputFileTracingExcludes: {
@@ -296,6 +268,7 @@ const nextConfig = {
     // Using "**/*" ensures the exclusion applies across all app and API routes, not just "/".
     "**/*": [
       "**/.git/**",
+      "**/.eslintcache",
       "**/_tasks/**",
       "**/_references/**",
       "**/_ideia/**",
@@ -327,6 +300,15 @@ const nextConfig = {
     // analysis can't follow _require.resolve("sql.js/package.json") and spams
     // build warnings.  Externalizing silences them without changing behaviour.
     "sql.js",
+    // tiktoken's node build reads tiktoken_bg.wasm via __dirname-relative
+    // fs.readFileSync at import time. When bundled (webpack or Turbopack), the
+    // wasm asset is not traced into the server chunk / the ESM entry's module
+    // graph omits the runtime asset, and page-data collection for any route
+    // importing the vendored ChatGPT Web tokenizer (e.g. /api/providers) fails
+    // with "Missing tiktoken_bg.wasm". Externalizing keeps Node's CommonJS
+    // require at runtime, where node_modules/tiktoken/tiktoken_bg.wasm
+    // resolves normally.
+    "tiktoken",
     // sqlite-vec ships a native vec0.so loaded at runtime via createRequire().
     // Turbopack otherwise tries to bundle the .so and fails with "Unknown module
     // type"; externalizing it keeps the require at runtime (like better-sqlite3).
@@ -336,9 +318,10 @@ const nextConfig = {
     "keytar",
     "wreq-js",
     "zod",
-    "tls-client-node",
-    "koffi",
-    "tough-cookie",
+    // jsdom relies on Node class relationships that Turbopack's server-chunk transform can break
+    // (observed as "Class extends value undefined" during Vertex metadata sync). Keep the native
+    // package boundary; standalone file tracing still copies the runtime dependency.
+    "jsdom",
     "@ngrok/ngrok",
     "@huggingface/transformers",
     // copilot-m365-web.ts imports 'ws' as a client-side WebSocket. When bundled,
@@ -348,6 +331,13 @@ const nextConfig = {
     "ws",
     "bufferutil",
     "utf-8-validate",
+    // The SDK's client graph has a module-level `class extends Client` cycle
+    // against the TLA Client module. Bundled into route chunks it throws
+    // "Cannot access 'l' before initialization" during evaluation and every
+    // /api/mcp/stream initialize answers HTTP 500. Node's native ESM loader
+    // resolves the same circular graph via live bindings, so keep the SDK
+    // out of the webpack server bundle.
+    "@modelcontextprotocol/sdk",
     "child_process",
     "fs",
     "path",
@@ -448,13 +438,22 @@ const nextConfig = {
       // NormalModuleReplacementPlugin swaps the real module for a stub before
       // webpack resolves it, so the privileged source files are never compiled
       // into the standalone output.
+      // BUGFIX (Chat 327, D-1): resource.request resolves relative to the
+      // *importing file's* directory, not the project root -- a bare
+      // "./src/..." string only worked for imports from projectRoot itself.
+      // Use an absolute path (import.meta.url-derived projectRoot, already
+      // defined above) so this resolves correctly regardless of which file
+      // does the importing.
       const replacements = [
-        [/^@\/mitm\/cert\/install$/, "./src/mitm/cert/install.stub.ts"],
-        [/^@\/lib\/zed-oauth\/keychain-reader$/, "./src/lib/zed-oauth/keychain-reader.stub.ts"],
-        [/^@\/lib\/cloudSync$/, "./src/lib/cloudSync.stub.ts"],
+        [/^@\/mitm\/cert\/install$/, join(projectRoot, "src/mitm/cert/install.stub.ts")],
+        [
+          /^@\/lib\/zed-oauth\/keychain-reader$/,
+          join(projectRoot, "src/lib/zed-oauth/keychain-reader.stub.ts"),
+        ],
+        [/^@\/lib\/cloudSync$/, join(projectRoot, "src/lib/cloudSync.stub.ts")],
         [
           /^@\/lib\/services\/installers\/ninerouter$/,
-          "./src/lib/services/installers/ninerouter.stub.ts",
+          join(projectRoot, "src/lib/services/installers/ninerouter.stub.ts"),
         ],
       ];
       for (const [pattern, stubPath] of replacements) {

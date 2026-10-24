@@ -94,9 +94,10 @@ test("messages/count_tokens uses real provider count when Claude-compatible upst
     assert.equal(body.input_tokens, 321);
     assert.equal(body.source, "provider");
     assert.equal(body.provider, "anthropic");
-    assert.equal(body.model, "claude-opus-4.6");
+    // The dotted catalog id goes upstream in the dashed form the Messages API accepts (#16425).
+    assert.equal(body.model, "claude-opus-4-6");
     assert.ok(captured.url.includes("/v1/messages/count_tokens"));
-    assert.equal(captured.body.model, "claude-opus-4.6");
+    assert.equal(captured.body.model, "claude-opus-4-6");
     assert.equal(captured.headers["x-api-key"], "sk-ant-count");
   } finally {
     globalThis.fetch = originalFetch;
@@ -142,7 +143,7 @@ test("messages/count_tokens rejects retired Felo models instead of estimating lo
   assert.equal(JSON.stringify(body).includes("felo-web"), false);
 });
 
-test("messages/count_tokens does not mask retired ChatGPT Web models as a local estimate", async () => {
+test("messages/count_tokens does not mask the retired ChatGPT Web alias as a local estimate", async () => {
   const originalFetch = globalThis.fetch;
   let fetchCalls = 0;
   globalThis.fetch = async () => {
@@ -151,7 +152,7 @@ test("messages/count_tokens does not mask retired ChatGPT Web models as a local 
   };
 
   try {
-    for (const provider of ["chatgpt-web", "cgpt-web"]) {
+    for (const provider of ["cgpt-web"]) {
       const alias = `count-via-${provider}`;
       await modelAliasesDb.setModelAlias(alias, `${provider}/gpt-5.5`);
       await settingsDb.updateSettings({

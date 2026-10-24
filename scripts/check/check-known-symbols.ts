@@ -211,6 +211,8 @@ export const KNOWN_TRANSLATOR_PAIRS: readonly string[] = [
   "antigravity:openai",
   "claude:gemini",
   "claude:openai",
+  // Naver CLOVA Studio Chat Completions v3 (native envelope, model in URL path).
+  "clova:openai",
   "cursor:openai",
   "gemini:claude",
   "gemini:openai",
@@ -218,6 +220,7 @@ export const KNOWN_TRANSLATOR_PAIRS: readonly string[] = [
   "openai-responses:openai",
   "openai:antigravity",
   "openai:claude",
+  "openai:clova",
   "openai:cursor",
   "openai:gemini",
   "openai:kiro",
@@ -473,6 +476,10 @@ export const AGENT_FILE_TO_REGISTRY_KEY: Record<string, string> = {
 // ───────────────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
+  if (!process.env.DATA_DIR?.trim()) delete process.env.DATA_DIR;
+  if (process.env.OMNIROUTE_ALLOW_DEFAULT_DATA_DIR !== "1") {
+    await import("../../tests/_setup/isolateDataDir.ts");
+  }
   const failures: string[] = [];
 
   // ── (1) Executor conformance ──────────────────────────────────────────────

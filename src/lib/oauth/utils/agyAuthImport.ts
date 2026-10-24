@@ -224,10 +224,12 @@ export async function findExistingAgyConnection(email?: string | null): Promise<
       const conn = c as JsonRecord;
       return toNonEmptyString(conn.email)?.toLowerCase() === lowerEmail;
     }) as JsonRecord | undefined;
-    if (match) return match;
+    // A verified email that matches no row is a different account: never fold
+    // it into another account's connection.
+    return match ?? null;
   }
-  // If no email or no exact email match, and there is only 1 connection on the agy provider,
-  // associate with that connection rather than creating duplicate orphan rows.
+  // Without an email, and with only 1 connection on the agy provider, associate
+  // with that connection rather than creating duplicate orphan rows.
   if (connections.length === 1) {
     return (connections[0] as JsonRecord) ?? null;
   }

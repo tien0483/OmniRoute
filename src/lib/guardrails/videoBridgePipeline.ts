@@ -66,7 +66,10 @@ import {
   safeSetCacheEntry,
   videoBridgeAbortError,
 } from "./videoBridgeResultCache";
-import { callVisionModel as defaultCallVisionModel, type VisionModelConfig } from "./visionBridgeHelpers";
+import {
+  callVisionModel as defaultCallVisionModel,
+  type VisionModelConfig,
+} from "./visionBridgeHelpers";
 
 export interface VideoAnalysisContext {
   /** Effective prompt behavior after the no-text fallback. */
@@ -139,8 +142,13 @@ function waitForVideoBridgePromise<T>(promise: Promise<T>, signal: AbortSignal):
 // boundary, budgets, cross-source reconciliation, focus scoping) — bump so a
 // cache entry computed under the old, less-restrictive normalization can
 // never be served for a request processed under the new contract.
-const VIDEO_BRIDGE_RESULT_CACHE_VERSION = "v5";
-const VIDEO_BRIDGE_RESULT_CACHE_POLICY = "sampling-then-dedup-v2";
+// v6 (#12150): VideoResultCacheMetadata gained `descriptionRedacted` (the
+// structured transcript-redaction shadow) — bump so a cache entry written
+// before this field existed can never be served with `descriptionRedacted`
+// silently undefined, which would read as "no transcript" / mark
+// `videoBridgeObserved: false` for a video that does carry one.
+const VIDEO_BRIDGE_RESULT_CACHE_VERSION = "v6";
+const VIDEO_BRIDGE_RESULT_CACHE_POLICY = "sampling-then-dedup-v3-client-transcript";
 const VIDEO_BRIDGE_RESULT_CACHE_KEY_KIND = "video-result-v4";
 const VIDEO_BRIDGE_DOWNLOAD_FLIGHT_VERSION = "v1";
 
@@ -203,6 +211,8 @@ interface VideoResultCacheMetadata {
   transcriptCuesApplied?: number;
   contactSheetUsed?: boolean;
   fusion?: VideoFusionTelemetry;
+  /** Log-safe redacted shadow of the cached description (see `DescribedVideo.descriptionRedacted`). */
+  descriptionRedacted?: string;
   cacheBytes: number;
   modelUsed: string;
 }
@@ -249,7 +259,10 @@ function createVideoResultCacheIdentity(
   return {
     analysisMode: analysis.analysisMode,
     cacheVersion: VIDEO_BRIDGE_RESULT_CACHE_VERSION,
-    dedupCandidateFrameCount: resolveVideoDedupCandidateFrameCount(runtime.frameCount),
+    dedupCandidateFrameCount: resolveVideoDedupCandidateFrameCount(
+      runtime.frameCount,
+      runtime.samplingPolicy
+    ),
     dedupPolicyVersion: VIDEO_DEDUP_POLICY_VERSION,
     dedupThreshold: VIDEO_DEDUP_THRESHOLD,
     extractorVersion: VIDEO_BRIDGE_RESULT_CACHE_VERSION,
@@ -395,7 +408,8 @@ function isVideoResultCacheMetadata(
     (record.transcriptCuesApplied === undefined ||
       isFiniteNonNegativeInteger(record.transcriptCuesApplied)) &&
     (record.contactSheetUsed === undefined || typeof record.contactSheetUsed === "boolean") &&
-    (record.fusion === undefined || isFusionTelemetry(record.fusion))
+    (record.fusion === undefined || isFusionTelemetry(record.fusion)) &&
+    (record.descriptionRedacted === undefined || typeof record.descriptionRedacted === "string")
   );
 }
 
@@ -417,6 +431,8 @@ interface DescribeWithVisionModelDeps {
     config: VisionModelConfig,
     apiKey?: string
   ) => Promise<string>;
+  /** GHSA-3w2r: the caller API key's scope, applied to every frame describe. */
+  visionKeyScope?: VisionModelConfig["keyScope"];
 }
 
 async function describeWithVisionModel(
@@ -447,7 +463,11 @@ async function describeWithVisionModel(
       timeoutMs: runtime.timeoutMs,
     },
     async (frameDataUri, timestampSeconds, signal) => {
-      const prompt = composeVideoFramePrompt(visionRuntime.prompt, timestampSeconds, analysis.focusHint);
+      const prompt = composeVideoFramePrompt(
+        visionRuntime.prompt,
+        timestampSeconds,
+        analysis.focusHint
+      );
       const key = cache
         ? bridgeCacheKey(frameDataUri, `${prompt}@${timestampSeconds.toFixed(3)}`, selectedModel)
         : null;
@@ -469,6 +489,7 @@ async function describeWithVisionModel(
         signal,
         timeoutMs: runtime.timeoutMs,
         fetchImpl: undiciFetch as unknown as typeof fetch,
+        ...(deps.visionKeyScope ? { keyScope: deps.visionKeyScope } : {}),
       });
       successfulModels.add(producerModel);
       if (key && cache) cache.setEntry(key, { value: caption, producerModel });
@@ -494,12 +515,17 @@ export interface ProcessVideoPartDeps {
   selectVideoModel: () => Promise<string | null>;
   /** Mirrors `VideoBridgeDependencies.describePart` — bypasses the internal
    * vision-model path entirely when supplied (test/override seam). */
-  overrideDescribePart?: (part: VideoPart, analysis: VideoAnalysisContext) => Promise<DescribedVideo>;
+  overrideDescribePart?: (
+    part: VideoPart,
+    analysis: VideoAnalysisContext
+  ) => Promise<DescribedVideo>;
   callVisionModel?: (
     imageDataUri: string,
     config: VisionModelConfig,
     apiKey?: string
   ) => Promise<string>;
+  /** GHSA-3w2r: the caller API key's scope, applied to every frame describe. */
+  visionKeyScope?: VisionModelConfig["keyScope"];
 }
 
 export interface ProcessVideoPartParams {
@@ -520,6 +546,8 @@ export type ProcessVideoPartResult =
       contactSheetUsed: boolean;
       dedupDropped: number;
       description: string;
+      /** Log-safe redacted shadow (see `DescribedVideo.descriptionRedacted`); undefined when no transcript cue was rendered. */
+      descriptionRedacted?: string;
       durationSeconds: number;
       framesExtracted: number;
       framesRequested: number;
@@ -565,13 +593,25 @@ export async function processVideoPart(
             buildVideoDownloadFlightKey(part, context, VIDEO_BRIDGE_MAX_BYTES, runtime.timeoutMs),
             attemptSignal,
             (downloadSignal) =>
-              deps.broker.loadVideoPartBytes(part, VIDEO_BRIDGE_MAX_BYTES, runtime.timeoutMs, downloadSignal, {
-                fetchRemote: deps.broker.fetchRemote,
-              })
+              deps.broker.loadVideoPartBytes(
+                part,
+                VIDEO_BRIDGE_MAX_BYTES,
+                runtime.timeoutMs,
+                downloadSignal,
+                {
+                  fetchRemote: deps.broker.fetchRemote,
+                }
+              )
           )
-        : await deps.broker.loadVideoPartBytes(part, VIDEO_BRIDGE_MAX_BYTES, runtime.timeoutMs, attemptSignal, {
-            fetchRemote: deps.broker.fetchRemote,
-          })
+        : await deps.broker.loadVideoPartBytes(
+            part,
+            VIDEO_BRIDGE_MAX_BYTES,
+            runtime.timeoutMs,
+            attemptSignal,
+            {
+              fetchRemote: deps.broker.fetchRemote,
+            }
+          )
       : null;
     const contentFingerprint =
       deps.cache && videoBytes
@@ -609,6 +649,7 @@ export async function processVideoPart(
           contactSheetUsed: meta.contactSheetUsed ?? false,
           dedupDropped: meta.dedupDropped ?? 0,
           description: cachedResult.value,
+          descriptionRedacted: meta.descriptionRedacted,
           durationSeconds: meta.durationSeconds,
           framesExtracted: meta.framesExtracted,
           framesRequested: meta.framesRequested,
@@ -639,7 +680,12 @@ export async function processVideoPart(
             analysis,
             processingSignal,
             videoBytes ?? undefined,
-            { broker: deps.broker, transcription: deps.transcription, callVisionModel: deps.callVisionModel }
+            {
+              broker: deps.broker,
+              transcription: deps.transcription,
+              callVisionModel: deps.callVisionModel,
+              visionKeyScope: deps.visionKeyScope,
+            }
           );
       if (processingSignal.aborted) throw videoBridgeAbortError();
       const resultCacheBytes = Buffer.byteLength(described.description, "utf8");
@@ -663,10 +709,14 @@ export async function processVideoPart(
               modelUsed: described.modelUsed ?? resultCacheIdentity.model,
               samplingCandidateCount: described.sampling?.candidateCount ?? 0,
               samplingPolicyEffective: described.sampling?.policyEffective ?? "uniform",
-              samplingPolicyRequested: described.sampling?.policyRequested ?? runtime.samplingPolicy,
+              samplingPolicyRequested:
+                described.sampling?.policyRequested ?? runtime.samplingPolicy,
               transcriptCuesApplied: described.transcriptCues?.length ?? 0,
               contactSheetUsed: described.contactSheetUsed ?? false,
               ...(described.fusion ? { fusion: described.fusion } : {}),
+              ...(described.descriptionRedacted
+                ? { descriptionRedacted: described.descriptionRedacted }
+                : {}),
             },
           },
           context.log
@@ -704,6 +754,7 @@ export async function processVideoPart(
       contactSheetUsed: described.contactSheetUsed ?? false,
       dedupDropped: described.dedupDropped ?? 0,
       description: described.description,
+      descriptionRedacted: described.descriptionRedacted,
       durationSeconds: described.durationSeconds,
       framesExtracted: described.framesExtracted ?? described.framesUsed,
       framesRequested: described.framesRequested,

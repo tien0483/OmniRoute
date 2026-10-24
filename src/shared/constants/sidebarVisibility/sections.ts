@@ -41,6 +41,15 @@ const OMNI_PROXY_ITEMS: readonly SidebarItemDefinition[] = [
     icon: "dns",
   },
   {
+    id: "model-catalog",
+    href: "/dashboard/models",
+    i18nKey: "modelCatalog",
+    labelFallback: "Models & Combos",
+    subtitleKey: "modelCatalogSubtitle",
+    subtitleFallback: "Browse models and combos across providers",
+    icon: "view_list",
+  },
+  {
     id: "embedded-services",
     href: "/dashboard/providers/services",
     i18nKey: "embeddedServices",
@@ -463,6 +472,13 @@ const SYSTEM_GROUP: SidebarItemGroup = {
       subtitleKey: "resilienceConnectionsSubtitle",
       icon: "shield",
     },
+    {
+      id: "resilience-cooldowns",
+      href: "/dashboard/resilience/cooldowns",
+      i18nKey: "resilienceCooldowns",
+      subtitleKey: "resilienceCooldownsSubtitle",
+      icon: "timer_off",
+    },
   ],
 };
 
@@ -648,6 +664,13 @@ const GAMIFICATION_GROUP: SidebarItemGroup = {
       i18nKey: "tokens",
       subtitleKey: "tokensSubtitle",
       icon: "toll",
+    },
+    {
+      id: "gamification-admin",
+      href: "/dashboard/gamification/admin",
+      i18nKey: "gamificationAdmin",
+      subtitleKey: "gamificationAdminSubtitle",
+      icon: "admin_panel_settings",
     },
   ],
 };
@@ -844,7 +867,6 @@ export const SIDEBAR_SECTIONS: readonly SidebarSectionDefinition[] = [
     titleKey: "devtoolsSection",
     titleFallback: "Dev Tools",
     children: DEVTOOLS_ITEMS,
-    visibility: "debug",
   },
   {
     id: "agentic-features",

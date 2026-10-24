@@ -53,7 +53,6 @@ the task's capability filter (vision, JSON mode, tools, max-context).
 | Provider         | Free quota / credits                 |
 | ---------------- | ------------------------------------ |
 | Kiro AI          | Free Claude tier (generous fair-use) |
-| OpenCode Free    | No auth, generous rate limits        |
 | Qoder            | Free OAuth                           |
 | Google Vertex AI | $300 new-account credits             |
 | Amazon Q         | Free tier for AWS users              |
@@ -69,7 +68,7 @@ rate limits — circuit breaker recovers them on backoff.
 Dashboard → **Tiers** → assign your providers. Defaults (from `tierDefaults.json`) are
 sensible; edit when you have specific subscriptions to prioritize or providers to exclude.
 
-Auto-Combo's 15-factor scoring also considers tier. See
+Auto-Combo's 16-factor scoring also considers tier. See
 [`docs/routing/AUTO-COMBO.md`](../routing/AUTO-COMBO.md).
 
 ## Telemetry
